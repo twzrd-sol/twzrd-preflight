@@ -1,0 +1,88 @@
+{
+  "id": "twzrd-preflight",
+  "name": "TWZRD Preflight",
+  "description": "Trust gate for agent payments: blocks payment-shaped tool calls (MCP + exec/curl x402) when TWZRD preflight says the counterparty is not safe to pay. Shadow mode by default.",
+  "version": "0.1.1",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "mode": {
+        "type": "string",
+        "enum": ["off", "shadow", "enforce"],
+        "default": "shadow",
+        "description": "off = disabled; shadow = evaluate + log would-blocks, never block; enforce = block on decision=block."
+      },
+      "failMode": {
+        "type": "string",
+        "enum": ["open", "closed"],
+        "default": "open",
+        "description": "Behavior when the trust API is unreachable: open = allow the tool call, closed = block it (enforce mode only)."
+      },
+      "timeoutMs": {
+        "type": "number",
+        "default": 5000,
+        "description": "Preflight HTTP timeout in ms. On timeout, failMode applies."
+      },
+      "maxPriceUsdc": {
+        "type": ["number", "null"],
+        "default": null,
+        "description": "Local price ceiling in USDC. Payment calls above this are blocked (enforce) or logged (shadow) without calling the API."
+      },
+      "endpoint": {
+        "type": "string",
+        "default": "https://intel.twzrd.xyz",
+        "description": "TWZRD intel API base URL."
+      },
+      "denyWallets": {
+        "type": "array",
+        "items": { "type": "string" },
+        "default": [],
+        "description": "Local denylist of seller wallet addresses. Always blocked in enforce mode, no API call."
+      },
+      "allowWallets": {
+        "type": "array",
+        "items": { "type": "string" },
+        "default": [],
+        "description": "Local allowlist of seller wallet addresses. Always allowed, no API call."
+      },
+      "cacheTtlMs": {
+        "type": "number",
+        "default": 3600000,
+        "description": "TTL in ms for per-seller decision cache and 402 payTo origin cache."
+      },
+      "matchers": {
+        "type": "array",
+        "default": [],
+        "description": "Extra tool matchers extending coverage beyond the built-in AgentCash + exec rails. Matched in order; first match wins.",
+        "items": {
+          "type": "object",
+          "required": ["tool"],
+          "additionalProperties": false,
+          "properties": {
+            "tool": {
+              "type": "string",
+              "description": "Tool name or substring to match (case-insensitive)."
+            },
+            "walletParam": {
+              "type": "string",
+              "description": "Param key whose value is the seller wallet (base58 Solana pubkey)."
+            },
+            "urlParam": {
+              "type": "string",
+              "description": "Param key whose value is a URL; origin used as preflight resource_url."
+            },
+            "priceParam": {
+              "type": "string",
+              "description": "Param key for payment amount in USDC."
+            },
+            "resourceParam": {
+              "type": "string",
+              "description": "Param key for a human-readable resource name."
+            }
+          }
+        }
+      }
+    }
+  }
+}

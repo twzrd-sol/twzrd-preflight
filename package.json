@@ -1,0 +1,21 @@
+{
+  "name": "twzrd-preflight",
+  "version": "0.1.1",
+  "description": "OpenClaw plugin: TWZRD trust gate for agent payments. Gates payment-shaped tool calls (MCP + exec/curl x402) via free preflight before they execute. Shadow mode by default.",
+  "type": "module",
+  "main": "index.js",
+  "files": ["index.js", "openclaw.plugin.json", "README.md"],
+  "scripts": {
+    "test": "node test/harness.mjs"
+  },
+  "keywords": ["openclaw", "x402", "trust", "preflight", "agent-payments", "solana", "agentcash"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/twzrd-sol/twzrd-preflight.git"
+  },
+  "homepage": "https://intel.twzrd.xyz",
+  "engines": {
+    "node": ">=18"
+  }
+}
