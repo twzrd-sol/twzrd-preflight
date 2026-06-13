@@ -1,0 +1,23 @@
+{
+  "name": "twzrd-preflight",
+  "version": "0.1.1",
+  "description": "Codex wrapper and documentation for the TWZRD OpenClaw preflight gate.",
+  "author": {
+    "name": "TWZRD",
+    "url": "https://github.com/twzrd-sol"
+  },
+  "homepage": "https://github.com/twzrd-sol/twzrd-preflight",
+  "repository": "https://github.com/twzrd-sol/twzrd-preflight",
+  "license": "MIT",
+  "keywords": ["openclaw", "x402", "solana", "preflight", "trust"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "TWZRD Preflight",
+    "shortDescription": "OpenClaw gate for x402 payment trust checks.",
+    "longDescription": "Use TWZRD preflight before payment-shaped OpenClaw tool calls so agents can block Solana x402 micropayments when the live readiness card returns decision=block.",
+    "developerName": "TWZRD",
+    "category": "Security",
+    "capabilities": ["Interactive", "Read"],
+    "websiteURL": "https://github.com/twzrd-sol/twzrd-preflight"
+  }
+}
