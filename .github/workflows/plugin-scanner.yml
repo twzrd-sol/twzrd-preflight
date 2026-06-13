@@ -1,4 +1,4 @@
-name: Plugin Scanner
+name: Plugin Security Scan
 
 on:
   pull_request:
@@ -6,13 +6,11 @@ on:
     branches: [main]
 
 jobs:
-  plugin-scanner:
+  scan:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run HOL plugin scanner
-        run: |
-          python -m pip install --user pipx
-          python -m pipx run plugin-scanner lint .
-          python -m pipx run plugin-scanner verify .
-          python -m pipx run plugin-scanner scan . --min-score 80 --fail-on-severity high
+      - uses: hashgraph-online/ai-plugin-scanner-action@v1
+        with:
+          plugin_dir: "."
+          fail_on_severity: high
