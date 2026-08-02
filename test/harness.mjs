@@ -2,8 +2,29 @@
  * Phase 1 harness: exercises the gate hooks directly (no OpenClaw gateway needed).
  * Calls the LIVE free preflight API (no auth, no payments). Run: npm test
  */
+import { readFile, readdir } from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
 import { createGate } from "../index.js";
 import plugin from "../index.js";
+
+/** Concatenate every .d.ts under a dir (one level deep is enough for openclaw/dist). */
+async function collectDts(dir) {
+  let out = "";
+  let entries = [];
+  try {
+    entries = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return out;
+  }
+  for (const e of entries) {
+    if (e.isFile() && e.name.endsWith(".d.ts")) {
+      out += await readFile(path.join(dir, e.name), "utf8");
+    }
+  }
+  return out;
+}
 
 const QUIET = { info() {}, warn() {} };
 // Live-verified today: this resource+wallet pair returns decision=block (score 31).
@@ -171,23 +192,110 @@ await t("T9 telemetry marker: agent_intent carries hook + tool + mode", async ()
   );
 });
 
-await t("T10 plugin registers both hooks via the OpenClaw api surface", async () => {
+// T10 used to build its own `api` stub with an `.on()` method and assert the
+// plugin called it. That passed for months while the plugin was DEAD on every
+// recent OpenClaw build: `OpenClawPluginApi` has no `.on`, so the real
+// `register()` threw `TypeError: api.on is not a function` and the gate never
+// installed. The test asserted that our mock matched our mock.
+//
+// The stub below is derived from openclaw@2026.7.1-2's actual
+// `OpenClawPluginApi` type: hooks register through `registerHook(events,
+// handler, opts)`. It deliberately does NOT define `.on`, so a regression back
+// to the old call fails loudly here instead of shipping green.
+const OPENCLAW_CONTRACT_VERIFIED_AGAINST = "2026.7.1-2";
+
+function makeOpenClawApiStub(pluginConfig = { mode: "shadow" }) {
   const hooks = {};
-  const api = {
-    pluginConfig: { mode: "shadow" },
-    logger: QUIET,
-    on(name, fn) {
-      hooks[name] = fn;
+  const opts = {};
+  return {
+    hooks,
+    opts,
+    api: {
+      id: "twzrd-preflight",
+      name: "TWZRD Preflight",
+      source: "test",
+      registrationMode: "full",
+      config: {},
+      pluginConfig,
+      logger: QUIET,
+      // Present on the real API. NOTE: no `on` — that is the whole point.
+      registerHook(events, handler, o) {
+        for (const e of Array.isArray(events) ? events : [events]) {
+          hooks[e] = handler;
+          opts[e] = o;
+        }
+      },
+      registerTool() {},
     },
   };
-  plugin.register(api);
+}
+
+await t("T10 plugin registers both hooks via registerHook (real OpenClaw contract)", async () => {
+  const { api, hooks, opts } = makeOpenClawApiStub();
+  assert(api.on === undefined, "stub must not offer .on — the real API has no such member");
+
+  plugin.register(api); // must not throw
+
   assert(typeof hooks.before_tool_call === "function", "before_tool_call registered");
   assert(typeof hooks.after_tool_call === "function", "after_tool_call registered");
+  // OpenClawPluginHookOptions = { entry, name, description, register } — no `priority`.
+  for (const e of ["before_tool_call", "after_tool_call"]) {
+    assert(!("priority" in (opts[e] ?? {})), `${e}: 'priority' is not a valid hook option`);
+  }
   const r = await hooks.before_tool_call(
     { toolName: "exec", params: { command: curlCmd(BLOCK_WALLET, BLOCK_RESOURCE, 0.05) } },
     {},
   );
   assert(r === undefined, "shadow via real register() must not block");
+});
+
+await t("T10b source guard: plugin must never call api.on(", async () => {
+  // Source-level, so it cannot rot the way a hand-written stub can.
+  // Comments are stripped first: prose ABOUT the old call (like the one above
+  // the fix in index.js) must not trip the guard. A check that fires on its own
+  // documentation is the "cries wolf" failure mode that gets guards deleted.
+  const raw = await readFile(new URL("../index.js", import.meta.url), "utf8");
+  const code = raw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+  assert(
+    !/\bapi\s*\.\s*on\s*\(/.test(code),
+    "index.js calls api.on( — OpenClawPluginApi has no .on; use api.registerHook(...)",
+  );
+  assert(/api\s*\.\s*registerHook\s*\(/.test(code), "index.js must register via api.registerHook(");
+  // The guard must be able to fail, or it is decoration.
+  assert(
+    /\bapi\s*\.\s*on\s*\(/.test('api.on("before_tool_call", h, { priority: 10 });'),
+    "self-check: the api.on matcher must detect the old call form",
+  );
+});
+
+await t("T10c contract check against the installed openclaw package (skips if absent)", async () => {
+  // The only assertion that can detect the vendor moving again. Optional so the
+  // suite still runs without openclaw installed — but when it IS installed, the
+  // claim is derived from their shipped types, not from our belief about them.
+  // Resolve by FILESYSTEM path, not import.meta.resolve: openclaw's package
+  // `exports` map does not expose "./package.json", so the resolve form throws
+  // even when the package IS installed — the test then skipped while reporting
+  // PASS. That is the same hollow-gate bug this whole file exists to kill.
+  const dir = path.join(fileURLToPath(new URL("../", import.meta.url)), "node_modules", "openclaw");
+  let pkgRaw;
+  try {
+    pkgRaw = await readFile(path.join(dir, "package.json"), "utf8");
+  } catch {
+    console.log("  SKIP T10c (openclaw not installed — run `npm i -D openclaw` to enable)");
+    return;
+  }
+  const pkg = JSON.parse(pkgRaw);
+  const types = await collectDts(path.join(dir, "dist"));
+  assert(/registerHook\s*:/.test(types), `openclaw@${pkg.version}: registerHook missing from types`);
+  assert(
+    /\bbefore_tool_call\b/.test(types),
+    `openclaw@${pkg.version}: before_tool_call event no longer present`,
+  );
+  if (pkg.version !== OPENCLAW_CONTRACT_VERIFIED_AGAINST) {
+    console.log(
+      `  NOTE: openclaw ${pkg.version} != verified ${OPENCLAW_CONTRACT_VERIFIED_AGAINST} — contract re-checked above and still matches`,
+    );
+  }
 });
 
 await t("T11 custom matcher: walletParam extracted and sent to preflight", async () => {

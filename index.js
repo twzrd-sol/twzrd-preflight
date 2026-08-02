@@ -320,8 +320,25 @@ const plugin = {
     "Trust gate for agent payments: blocks payment-shaped tool calls when TWZRD preflight says the counterparty is not safe to pay.",
   register(api) {
     const gate = createGate(api.pluginConfig ?? {}, api.logger ?? console);
-    api.on("before_tool_call", (event, ctx) => gate.beforeToolCall(event, ctx), { priority: 10 });
-    api.on("after_tool_call", (event, ctx) => gate.afterToolCall(event, ctx));
+    // OpenClaw's plugin API registers hooks via `registerHook`, NOT `api.on`.
+    //
+    // This plugin shipped calling `api.on("before_tool_call", …, { priority: 10 })`.
+    // Verified against openclaw@2026.7.1-2: `OpenClawPluginApi` has no `.on`
+    // member at all (the only `on`-prefixed one is `onConversationBindingResolved`),
+    // so registration threw `TypeError: api.on is not a function` and the gate
+    // never installed. It did not degrade quietly — the plugin failed at load.
+    //
+    // `OpenClawPluginHookOptions` is `{ entry, name, description, register }`;
+    // there is no `priority`, so that option was invalid too and is dropped.
+    // The event NAMES are unchanged, so only the registration call moves.
+    api.registerHook("before_tool_call", (event, ctx) => gate.beforeToolCall(event, ctx), {
+      name: "twzrd-preflight:before_tool_call",
+      description: "Preflight payment-shaped tool calls against the TWZRD trust gate.",
+    });
+    api.registerHook("after_tool_call", (event, ctx) => gate.afterToolCall(event, ctx), {
+      name: "twzrd-preflight:after_tool_call",
+      description: "Learn seller payTo from observed 402 challenges.",
+    });
     api.logger?.info?.(
       `[twzrd-preflight] registered (mode=${(api.pluginConfig ?? {}).mode ?? DEFAULTS.mode})`,
     );
