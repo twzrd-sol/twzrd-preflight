@@ -4,6 +4,9 @@
   "description": "OpenClaw plugin: TWZRD trust gate for agent payments. Gates payment-shaped tool calls (MCP + exec/curl x402) via free preflight before they execute. Shadow mode by default.",
   "type": "module",
   "main": "index.js",
+  "openclaw": {
+    "extensions": ["./index.js"]
+  },
   "files": ["index.js", "openclaw.plugin.json", "README.md"],
   "scripts": {
     "test": "node test/harness.mjs"
