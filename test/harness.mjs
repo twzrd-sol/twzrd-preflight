@@ -326,5 +326,65 @@ await t("T11 custom matcher: walletParam extracted and sent to preflight", async
   );
 });
 
+
+await t("T10d package.json declares openclaw.extensions (npm install path)", async () => {
+  // Without this field `openclaw plugins install twzrd-preflight` fails: the
+  // loader reports the manifest as `missing` and never reaches index.js. Path
+  // loading (plugins.load.paths) worked regardless, which is why the gap went
+  // unnoticed — the install path is the one users are told to use.
+  //
+  // Contract, read from openclaw@2026.7.1-2's own manifest module:
+  //   "openclaw.extensions must be an array"
+  //   "openclaw.extensions[i] must be a non-empty string"
+  //   entries must stay inside the plugin directory
+  const pkgUrl = new URL("../package.json", import.meta.url);
+  const pkg = JSON.parse(await readFile(pkgUrl, "utf8"));
+  const ext = pkg.openclaw?.extensions;
+  assert(Array.isArray(ext), "package.json: openclaw.extensions must be an array");
+  assert(ext.length > 0, "package.json: openclaw.extensions must not be empty");
+  for (const e of ext) {
+    assert(typeof e === "string" && e.length > 0, `openclaw.extensions entry not a string: ${e}`);
+    assert(!e.startsWith("/") && !e.includes(".."), `entry must stay inside the plugin dir: ${e}`);
+    // The declared entry must actually exist, and must ship in the tarball.
+    await readFile(new URL(`../${e.replace(/^\.\//, "")}`, import.meta.url), "utf8");
+    const shipped = (pkg.files ?? []).some((f) => f === e.replace(/^\.\//, ""));
+    assert(shipped, `openclaw.extensions entry "${e}" is not listed in package.json files[]`);
+  }
+});
+
+await t("T10e openclaw's own manifest reader accepts our package.json (skips if absent)", async () => {
+  // Strongest available check: hand our real package.json to openclaw's shipped
+  // manifest module and require status "ok". Verified 2026-08-02 that removing
+  // the field flips this to status "missing" — i.e. it can fail.
+  const dir = path.join(fileURLToPath(new URL("../", import.meta.url)), "node_modules", "openclaw");
+  let files;
+  try {
+    files = await readdir(path.join(dir, "dist"));
+  } catch {
+    console.log("  SKIP T10e (openclaw not installed — run `npm i -D openclaw` to enable)");
+    return;
+  }
+  const manifestFile = files.find((f) => /^manifest-.*\.js$/.test(f));
+  assert(manifestFile, "openclaw dist: manifest module not found (vendor layout changed?)");
+  const mod = await import(path.join(dir, "dist", manifestFile));
+  const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  const statuses = Object.values(mod)
+    .filter((f) => typeof f === "function")
+    .map((f) => {
+      try {
+        return f(pkg, dir);
+      } catch {
+        return undefined;
+      }
+    })
+    .filter((r) => r && typeof r === "object" && "status" in r);
+  assert(statuses.length > 0, "no manifest status function found in openclaw dist");
+  assert(
+    statuses.some((r) => r.status === "ok"),
+    `openclaw manifest reader rejected our package.json: ${JSON.stringify(statuses)}`,
+  );
+});
+
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
