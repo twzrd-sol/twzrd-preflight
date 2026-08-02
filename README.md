@@ -108,3 +108,23 @@ npm test    # 13-case harness; hits the live FREE preflight (no auth, no payment
 ```
 
 Verified against OpenClaw 2026.3.13.
+
+## CLI
+
+```bash
+npx twzrd-preflight <solana-wallet-or-x402-url>
+npx twzrd-preflight <wallet> --json
+npx twzrd-preflight <url> --strict
+```
+
+Exits 0 on allow/warn, 1 on block. Useful for scripts and one-off checks. Sends the same X-Twzrd-Caller header.
+
+## Attribution
+
+All preflight calls (plugin and CLI) now include:
+
+```
+X-Twzrd-Caller: twzrd-preflight/<version>
+```
+
+This lets the intel surface attribute seats and free-card usage back to this integration for scoreboard / distribution tracking.

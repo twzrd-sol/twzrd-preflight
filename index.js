@@ -18,7 +18,17 @@
  * Privacy: tool call metadata (toolName, seller_wallet, resource_name,
  * price_usdc) is sent to intel.twzrd.xyz for trust scoring. No payload
  * content or full params are forwarded. See https://intel.twzrd.xyz/privacy.
+ *
+ * Attribution: sends X-Twzrd-Caller: twzrd-preflight/<ver> on preflight calls
+ * for seat/scoreboard tracking.
  */
+
+import { readFileSync } from "fs";
+
+const pkg = JSON.parse(
+  readFileSync(new URL("./package.json", import.meta.url), "utf8")
+);
+const CALLER = `twzrd-preflight/${pkg.version}`;
 
 const DEFAULTS = {
   mode: "shadow", // off | shadow | enforce
@@ -177,7 +187,10 @@ export function createGate(rawCfg = {}, logger = console) {
     try {
       const res = await fetch(`${cfg.endpoint}/v1/intel/preflight`, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { 
+          "content-type": "application/json",
+          "X-Twzrd-Caller": CALLER,
+        },
         body: JSON.stringify(body),
         signal: ctrl.signal,
       });
