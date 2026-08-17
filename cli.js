@@ -105,7 +105,7 @@ function formatCard(card, raw) {
     lines.push("", `  ${c(color.dim, "Full report:")} ${c(color.cyan, `https://intel.twzrd.xyz${card.paid_deep_dive}`)}`);
   }
 
-  lines.push("", `  ${c(color.dim, "(via ${CALLER})")}`);
+  lines.push("", `  ${c(color.dim, `(via ${CALLER})`)}`);
 
   return lines.join("\n");
 }
