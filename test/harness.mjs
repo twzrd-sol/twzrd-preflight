@@ -352,6 +352,32 @@ await t("T10d package.json declares openclaw.extensions (npm install path)", asy
   }
 });
 
+await t("T10f ClawHub requires pluginApi + openclawVersion; manifest version lockstep", async () => {
+  // ClawHub package publish rejects external code plugins that omit
+  // openclaw.compat.pluginApi / openclaw.build.openclawVersion. The 0.1.4
+  // tarball failed dry-run on exactly those two fields, and its
+  // openclaw.plugin.json still said 0.1.3 (package-manifest-version-drift).
+  // Read the shipped files — do not re-state the versions in this test.
+  const root = new URL("../", import.meta.url);
+  const pkg = JSON.parse(await readFile(new URL("package.json", root), "utf8"));
+  const plugin = JSON.parse(await readFile(new URL("openclaw.plugin.json", root), "utf8"));
+  const pluginApi = pkg.openclaw?.compat?.pluginApi;
+  const builtAgainst = pkg.openclaw?.build?.openclawVersion;
+  assert(typeof pluginApi === "string" && pluginApi.length > 0, "package.json: openclaw.compat.pluginApi missing");
+  assert(pluginApi.startsWith(">="), `pluginApi must be a range, got ${pluginApi}`);
+  assert(
+    typeof builtAgainst === "string" && builtAgainst.length > 0,
+    "package.json: openclaw.build.openclawVersion missing",
+  );
+  assert(plugin.version === pkg.version, `manifest ${plugin.version} != package ${pkg.version}`);
+  // The guard must be able to fail, or it is decoration.
+  const stripped = { ...pkg, openclaw: { ...(pkg.openclaw ?? {}), compat: {}, build: {} } };
+  assert(
+    !(typeof stripped.openclaw?.compat?.pluginApi === "string" && stripped.openclaw.compat.pluginApi.length > 0),
+    "self-check: missing pluginApi must fail the presence test",
+  );
+});
+
 await t("T10e openclaw's own manifest reader accepts our package.json (skips if absent)", async () => {
   // Strongest available check: hand our real package.json to openclaw's shipped
   // manifest module and require status "ok". Verified 2026-08-02 that removing

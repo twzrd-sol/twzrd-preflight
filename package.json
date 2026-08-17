@@ -1,6 +1,6 @@
 {
   "name": "twzrd-preflight",
-  "version": "0.1.4",
+  "version": "0.1.6",
   "description": "TWZRD trust preflight: OpenClaw plugin + CLI. Free ReadinessCard for any Solana wallet or x402 URL: `npx twzrd-preflight <wallet-or-url>` \u2014 then escalate to a paid $0.05 signed V6 trust receipt (x402) when you need deeper evidence. Includes X-Twzrd-Caller attribution for seats.",
   "type": "module",
   "main": "index.js",
@@ -10,7 +10,13 @@
   "openclaw": {
     "extensions": [
       "./index.js"
-    ]
+    ],
+    "compat": {
+      "pluginApi": ">=2026.3.24-beta.2"
+    },
+    "build": {
+      "openclawVersion": "2026.7.1-2"
+    }
   },
   "files": [
     "index.js",
