@@ -1,7 +1,7 @@
 {
   "name": "twzrd-preflight",
   "version": "0.1.5",
-  "description": "TWZRD trust preflight: OpenClaw plugin + CLI. Free ReadinessCard for any Solana wallet or x402 URL: `npx twzrd-preflight <wallet-or-url>` \u2014 then escalate to a paid $0.05 signed V6 trust receipt (x402) when you need deeper evidence. Includes X-Twzrd-Caller attribution for seats.",
+  "description": "TWZRD trust preflight: OpenClaw plugin + CLI. Free ReadinessCard for any Solana wallet or x402 URL: `npx twzrd-preflight <wallet-or-url>` — then escalate to a paid $0.05 signed V6 trust receipt (x402) when you need deeper evidence. Includes X-Twzrd-Caller attribution for seats.",
   "type": "module",
   "main": "index.js",
   "bin": {
@@ -10,7 +10,13 @@
   "openclaw": {
     "extensions": [
       "./index.js"
-    ]
+    ],
+    "compat": {
+      "pluginApi": ">=2026.7.1"
+    },
+    "build": {
+      "openclawVersion": "2026.7.1-2"
+    }
   },
   "files": [
     "index.js",
@@ -33,10 +39,13 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/twzrd-sol/twzrd-preflight.git"
+    "url": "git+https://github.com/twzrd-sol/twzrd-preflight.git"
   },
   "homepage": "https://intel.twzrd.xyz",
   "engines": {
     "node": ">=18"
+  },
+  "devDependencies": {
+    "openclaw": "^2026.7.1-2"
   }
 }
