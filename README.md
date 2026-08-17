@@ -4,6 +4,26 @@ OpenClaw plugin: TWZRD trust gate for agent payments. Gates payment-shaped tool 
 free preflight check before they execute. Blocked counterparties are stopped (enforce mode) or
 logged (shadow mode). Safe counterparties are allowed through; decisions are cached for 1 hour.
 
+**Check the seller before you pay:** free ReadinessCard first, then buy a portable signed V6
+trust receipt only when you need deeper evidence.
+
+```bash
+npx twzrd-preflight <wallet-or-x402-url>
+```
+
+## Paid escalation ($0.05 signed V6 receipt)
+
+The free card is a corpus teaser. When the decision is `warn` and you need the full renorm
+score plus a portable signed receipt, the card prints the paid route:
+
+- `GET https://intel.twzrd.xyz/v1/intel/trust/{wallet}` — 0.05 USDC via x402 (Solana mainnet):
+  full intel + signed V6 receipt.
+- `GET https://intel.twzrd.xyz/v1/intel/quick/{wallet}` — 0.001 USDC quick tier: score only,
+  no receipt.
+
+Any x402-capable client can settle these; every free card includes the exact paid URL for the
+wallet it scored.
+
 ## Install
 
 ```bash
