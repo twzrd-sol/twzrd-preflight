@@ -1,8 +1,12 @@
 # twzrd-preflight
 
-OpenClaw plugin: TWZRD trust gate for agent payments. Gates payment-shaped tool calls via a
-free preflight check before they execute. Blocked counterparties are stopped (enforce mode) or
-logged (shadow mode). Safe counterparties are allowed through; decisions are cached for 1 hour.
+OpenClaw plugin **0.2.0**: install = intercept.
+
+`wrapFetchWithTwzrdPreflight` runs TWZRD preflight + merchant_card **wash refuse**
+on every HTTP **402** before a signer can attach payment. Defaults: **enforce**,
+**fail-closed**, **refuseWashFlagged on**. Shadow / fail-open / wash-off are opt-in.
+
+Also gates payment-shaped OpenClaw tool calls (`before_tool_call`).
 
 **Check the seller before you pay:** free ReadinessCard first, then buy a portable signed V6
 trust receipt only when you need deeper evidence.
@@ -38,12 +42,24 @@ Register in your OpenClaw config:
 }
 ```
 
+HTTP 402 wrap (OpenClaw has no global-fetch hook — assign this on the client's fetch):
+
+```js
+import { wrapFetchWithTwzrdPreflight } from "twzrd-preflight";
+const fetch = wrapFetchWithTwzrdPreflight(globalThis.fetch);
+```
+
+A wash-flagged `payTo` **throws** `TwzrdPaymentBlockedError` with
+`error.refuse.schema === "twzrd.gate_eval_refuse.v1"` (`signer_invocation_count: 0`,
+`usdc_spent: 0`). Mechanism proof, not an EXTERNAL_RUN.
+
 ## Configuration
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `mode` | `"shadow"` | `off` / `shadow` (log only) / `enforce` (block on decision=block) |
-| `failMode` | `"open"` | `open` (allow on API timeout) or `closed` (block on timeout, enforce only) |
+| `mode` | `"enforce"` | `off` / `shadow` (opt-in log-only) / `enforce` |
+| `failMode` | `"closed"` | `closed` (block on intel outage) or `open` (opt-in allow) |
+| `refuseWashFlagged` | `true` | Refuse when merchant_card.wash_flagged; opt out with `false` |
 | `timeoutMs` | `5000` | Preflight HTTP timeout in ms |
 | `maxPriceUsdc` | `null` | Local price ceiling — blocks above this USDC amount without API call |
 | `endpoint` | `"https://intel.twzrd.xyz"` | TWZRD intel API base URL |
@@ -52,7 +68,7 @@ Register in your OpenClaw config:
 | `cacheTtlMs` | `3600000` | TTL for per-seller decision and 402 origin cache (1 hour) |
 | `matchers` | `[]` | Custom tool matchers for coverage beyond built-in rails |
 
-Example enforce config:
+Example opt-in (legacy shadow / fail-open / wash-off):
 
 ```json
 {
@@ -60,9 +76,9 @@ Example enforce config:
     {
       "name": "twzrd-preflight",
       "config": {
-        "mode": "enforce",
-        "maxPriceUsdc": 1.00,
-        "denyWallets": ["<known-bad-wallet>"]
+        "mode": "shadow",
+        "failMode": "open",
+        "refuseWashFlagged": false
       }
     }
   ]
