@@ -1,38 +1,42 @@
 /**
- * twzrd-preflight — OpenClaw plugin (Phase 1)
+ * twzrd-preflight — OpenClaw plugin (0.2.0)
  *
- * Gates payment-shaped tool calls on TWZRD trust:
- *   before_tool_call → match payment intent → POST /v1/intel/preflight (free)
- *   → block when readiness_card.decision === "block" (enforce mode).
- *   after_tool_call → observe x402 402 envelopes → cache origin → payTo wallet
- *   so the follow-up payment call is gated against a real Solana pubkey.
+ * Two seams:
+ *   1) wrapFetchWithTwzrdPreflight — HTTP 402 intercept (install = intercept).
+ *      Wash-flagged payTo throws before the caller can attach payment / sign.
+ *   2) before_tool_call — payment-shaped tool matchers (MCP + exec/curl x402).
  *
- * Coverage (honest): MCP payment tools + exec/curl x402 payments +
- *   custom matchers (configSchema.matchers array).
- * NOT covered: ClawRouter proxy settlements (sign inside localhost:8402,
- * invisible to tool hooks — needs the upstream onBeforePayment hook).
+ * Factory defaults: enforce, fail-closed, refuseWashFlagged on.
+ * Shadow / fail-open / wash-off are opt-in.
  *
- * Gate rule: decision === "block" only. NEVER gate on can_spend (free tier
- * defaults can_spend:false for unknown wallets; unknown = warn/45 = allow).
+ * Gate rule for tool calls: decision === "block" OR wash_flagged (default).
+ * NEVER gate on can_spend alone (free tier defaults can_spend:false for unknown).
  *
  * Privacy: tool call metadata (toolName, seller_wallet, resource_name,
  * price_usdc) is sent to intel.twzrd.xyz for trust scoring. No payload
  * content or full params are forwarded. See https://intel.twzrd.xyz/privacy.
- *
- * Attribution: sends X-Twzrd-Caller: twzrd-preflight/<ver> on preflight calls
- * for seat/scoreboard tracking.
  */
 
 import { readFileSync } from "fs";
+import { applyWashFlaggedPolicy, fetchMerchantCard } from "twzrd-x402-gate";
+import {
+  buildRefuse,
+  wrapFetchWithTwzrdPreflight,
+  getLastRefuse,
+  resetLastRefuse,
+  TwzrdPaymentBlockedError,
+  installTwzrdFetchWrap,
+} from "./wrap-fetch.js";
 
 const pkg = JSON.parse(
   readFileSync(new URL("./package.json", import.meta.url), "utf8")
 );
 const CALLER = `twzrd-preflight/${pkg.version}`;
 
-const DEFAULTS = {
-  mode: "shadow", // off | shadow | enforce
-  failMode: "open", // open | closed
+export const DEFAULTS = {
+  mode: "enforce", // off | shadow | enforce — shadow is opt-in
+  failMode: "closed", // closed = fail-closed; open is opt-in
+  refuseWashFlagged: true, // wash_flagged payTo refuses; opt out with false
   timeoutMs: 5000,
   maxPriceUsdc: null,
   endpoint: "https://intel.twzrd.xyz",
@@ -72,6 +76,9 @@ function originOf(u) {
 
 export function createGate(rawCfg = {}, logger = console) {
   const cfg = { ...DEFAULTS, ...rawCfg };
+  if (typeof cfg.fetch !== "function") {
+    cfg.fetch = globalThis.fetch.bind(globalThis);
+  }
   const log = {
     info: (...a) => logger.info?.("[twzrd-preflight]", ...a),
     warn: (...a) => logger.warn?.("[twzrd-preflight]", ...a),
@@ -185,7 +192,7 @@ export function createGate(rawCfg = {}, logger = console) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), cfg.timeoutMs);
     try {
-      const res = await fetch(`${cfg.endpoint}/v1/intel/preflight`, {
+      const res = await cfg.fetch(`${cfg.endpoint}/v1/intel/preflight`, {
         method: "POST",
         headers: { 
           "content-type": "application/json",
@@ -267,25 +274,58 @@ export function createGate(rawCfg = {}, logger = console) {
 
     const decision = await preflight(intent, event.toolName);
     if (decision === null) {
-      // API unreachable → failMode applies.
+      // API unreachable → failMode applies. Default closed.
       if (cfg.failMode === "closed") {
         if (verdict("trust API unreachable (failMode=closed)", intent, event.toolName)) {
           return {
             block: true,
             blockReason:
               "TWZRD trust gate: trust API unreachable and failMode=closed — payment not evaluated.",
+            refuse: buildRefuse({
+              payTo: intent.sellerWallet,
+              reason: "twzrd_fail_closed",
+              verdict: "block",
+            }),
           };
         }
       }
-      return; // fail-open
+      return; // fail-open opt-in
     }
-    if (decision === "block") {
-      const key = intent.sellerWallet ?? intent.origin;
-      if (verdict("decision=block", intent, event.toolName)) {
-        return { block: true, blockReason: renderReason(intent, key) };
+
+    let washFlagged = null;
+    if (cfg.refuseWashFlagged && intent.sellerWallet) {
+      const mcard = await fetchMerchantCard(intent.sellerWallet, {
+        intelBase: cfg.endpoint,
+        fetch: cfg.fetch,
+      });
+      if (mcard && typeof mcard.wash_flagged === "boolean") {
+        washFlagged = mcard.wash_flagged;
       }
     }
-    // allow | warn → proceed.
+    const wash = applyWashFlaggedPolicy({
+      approved: decision !== "block",
+      reason: decision === "block" ? "decision=block" : `decision=${decision}`,
+      washFlagged,
+      priceUsdc: intent.priceUsdc,
+      refuseWashFlagged: cfg.refuseWashFlagged === true,
+    });
+
+    if (!wash.approved) {
+      const key = intent.sellerWallet ?? intent.origin;
+      const why = wash.washFlagged === true ? wash.reason : "decision=block";
+      if (verdict(why, intent, event.toolName)) {
+        return {
+          block: true,
+          blockReason: renderReason(intent, key),
+          refuse: buildRefuse({
+            payTo: intent.sellerWallet,
+            reason: wash.reason,
+            verdict: "block",
+          }),
+        };
+      }
+    }
+    // allow | warn (and wash-off / wash unknown) → proceed.
   }
 
   /** Observe results for x402 402 envelopes; cache origin → payTo wallet. */
@@ -330,7 +370,7 @@ const plugin = {
   id: "twzrd-preflight",
   name: "TWZRD Preflight",
   description:
-    "Trust gate for agent payments: blocks payment-shaped tool calls when TWZRD preflight says the counterparty is not safe to pay.",
+    "Trust gate: wrapFetchWithTwzrdPreflight on HTTP 402 (wash refuse) plus payment-shaped tool-call hooks. Defaults: enforce, fail-closed, wash refuse on.",
   register(api) {
     const gate = createGate(api.pluginConfig ?? {}, api.logger ?? console);
     // OpenClaw's plugin API registers hooks via `registerHook`, NOT `api.on`.
@@ -356,6 +396,15 @@ const plugin = {
       `[twzrd-preflight] registered (mode=${(api.pluginConfig ?? {}).mode ?? DEFAULTS.mode})`,
     );
   },
+};
+
+export {
+  wrapFetchWithTwzrdPreflight,
+  getLastRefuse,
+  resetLastRefuse,
+  TwzrdPaymentBlockedError,
+  installTwzrdFetchWrap,
+  buildRefuse,
 };
 
 export default plugin;

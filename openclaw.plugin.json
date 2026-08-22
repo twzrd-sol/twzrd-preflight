@@ -1,8 +1,8 @@
 {
   "id": "twzrd-preflight",
   "name": "TWZRD Preflight",
-  "description": "Trust gate for agent payments: blocks payment-shaped tool calls (MCP + exec/curl x402) when TWZRD preflight says the counterparty is not safe to pay. Shadow mode by default.",
-  "version": "0.1.5",
+  "description": "Trust gate: wrapFetchWithTwzrdPreflight on HTTP 402 (wash refuse) plus payment-shaped tool-call hooks. Defaults: enforce, fail-closed, wash refuse on. Shadow/fail-open/wash-off are opt-in.",
+  "version": "0.2.0",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -10,14 +10,19 @@
       "mode": {
         "type": "string",
         "enum": ["off", "shadow", "enforce"],
-        "default": "shadow",
-        "description": "off = disabled; shadow = evaluate + log would-blocks, never block; enforce = block on decision=block."
+        "default": "enforce",
+        "description": "off = disabled; shadow = evaluate + log would-blocks, never block (opt-in); enforce = block on decision=block or wash_flagged."
       },
       "failMode": {
         "type": "string",
         "enum": ["open", "closed"],
-        "default": "open",
-        "description": "Behavior when the trust API is unreachable: open = allow the tool call, closed = block it (enforce mode only)."
+        "default": "closed",
+        "description": "Behavior when the trust API is unreachable: closed = block (default); open = allow (opt-in)."
+      },
+      "refuseWashFlagged": {
+        "type": "boolean",
+        "default": true,
+        "description": "Refuse payTo when free merchant_card.wash_flagged is true. Opt out with false."
       },
       "timeoutMs": {
         "type": "number",

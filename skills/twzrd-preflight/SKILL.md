@@ -22,7 +22,9 @@ OpenClaw config example:
     {
       "name": "twzrd-preflight",
       "config": {
-        "mode": "shadow",
+        "mode": "enforce",
+        "failMode": "closed",
+        "refuseWashFlagged": true,
         "endpoint": "https://intel.twzrd.xyz"
       }
     }
@@ -30,9 +32,9 @@ OpenClaw config example:
 }
 ```
 
-Use `shadow` to log would-blocks without blocking. Switch to `enforce` only when
-the operator wants calls to be blocked when TWZRD preflight returns
-`decision=block`.
+Factory defaults are enforce + fail-closed + wash refuse. Assign
+`wrapFetchWithTwzrdPreflight(fetch)` on the HTTP client so a 402 wash payTo
+cannot reach a signer. `mode: "shadow"` is opt-in (log only).
 
 The remote preflight endpoint is free. Paid trust receipts remain available from
 `https://intel.twzrd.xyz` for agents that need portable proof.
