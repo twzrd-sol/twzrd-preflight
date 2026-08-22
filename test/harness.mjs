@@ -6,7 +6,14 @@ import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createGate } from "../index.js";
+import {
+  createGate,
+  DEFAULTS,
+  wrapFetchWithTwzrdPreflight,
+  getLastRefuse,
+  resetLastRefuse,
+  TwzrdPaymentBlockedError,
+} from "../index.js";
 import plugin from "../index.js";
 
 /** Concatenate every .d.ts under a dir (one level deep is enough for openclaw/dist). */
@@ -143,7 +150,7 @@ await t("T6b cache-derived wallet is sent to preflight (allow on warn)", async (
 
 await t("T7a API unreachable + failMode=open → allow", async () => {
   const g = createGate(
-    { mode: "enforce", endpoint: "http://127.0.0.1:9", timeoutMs: 800 },
+    { mode: "enforce", failMode: "open", endpoint: "http://127.0.0.1:9", timeoutMs: 800 },
     QUIET,
   );
   const r = await g.beforeToolCall({
@@ -385,6 +392,137 @@ await t("T10e openclaw's own manifest reader accepts our package.json (skips if 
   );
 });
 
+
+await t("T12 factory defaults are enforce + fail-closed + wash refuse", async () => {
+  assert(DEFAULTS.mode === "enforce", `mode default ${DEFAULTS.mode}`);
+  assert(DEFAULTS.failMode === "closed", `failMode default ${DEFAULTS.failMode}`);
+  assert(DEFAULTS.refuseWashFlagged === true, "refuseWashFlagged must default true");
+  const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  const pluginManifest = JSON.parse(
+    await readFile(new URL("../openclaw.plugin.json", import.meta.url), "utf8"),
+  );
+  assert(pkg.version === "0.2.0", `package.json version ${pkg.version}`);
+  assert(pluginManifest.version === "0.2.0", `plugin manifest version ${pluginManifest.version}`);
+  assert(pluginManifest.configSchema.properties.mode.default === "enforce", "manifest mode default");
+  assert(
+    pluginManifest.configSchema.properties.failMode.default === "closed",
+    "manifest failMode default",
+  );
+  assert(
+    pluginManifest.configSchema.properties.refuseWashFlagged.default === true,
+    "manifest refuseWashFlagged default",
+  );
+});
+
+await t("T13 injected 402 wash-flagged payTo throws; no pay retry; refuse transcript", async () => {
+  resetLastRefuse();
+  const WASH_PAYTO = "WashWashWashWashWashWashWashWashWashWash1111";
+  let resourceCalls = 0;
+  let intelCalls = 0;
+  const RESOURCE = "https://seller.example/x402/item";
+
+  const innerFetch = async (input) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (url.startsWith(RESOURCE) || url.includes("seller.example")) {
+      resourceCalls += 1;
+      return new Response(
+        JSON.stringify({
+          accepts: [
+            {
+              scheme: "exact",
+              network: "solana",
+              payTo: WASH_PAYTO,
+              maxAmountRequired: "50000",
+              resource: RESOURCE,
+            },
+          ],
+        }),
+        { status: 402, headers: { "content-type": "application/json" } },
+      );
+    }
+    throw new Error(`inner fetch unexpected url ${url}`);
+  };
+
+  const intelFetch = async (input, init) => {
+    intelCalls += 1;
+    const url = typeof input === "string" ? input : input.url;
+    if (String(init?.method ?? "GET").toUpperCase() === "POST" && url.includes("/preflight")) {
+      return new Response(
+        JSON.stringify({
+          readiness_card: {
+            decision: "warn",
+            trust_score: 50,
+            can_spend: false,
+            seller_wallet: WASH_PAYTO,
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    if (url.includes("/merchant_card/")) {
+      return new Response(JSON.stringify({ wash_flagged: true, merchant: WASH_PAYTO }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    throw new Error(`intel fetch unexpected ${init?.method} ${url}`);
+  };
+
+  const gated = wrapFetchWithTwzrdPreflight(innerFetch, {
+    fetch: intelFetch,
+    refuseWashFlagged: true,
+    failMode: "closed",
+    endpoint: "https://intel.twzrd.xyz",
+  });
+
+  let threw = null;
+  try {
+    await gated(RESOURCE);
+    // A caller that got a 402 back would retry with payment — that must not happen.
+    resourceCalls += 1;
+    await gated(RESOURCE, { headers: { "PAYMENT-SIGNATURE": "would-sign" } });
+  } catch (err) {
+    threw = err;
+  }
+
+  assert(threw instanceof TwzrdPaymentBlockedError, `expected TwzrdPaymentBlockedError, got ${threw}`);
+  assert(resourceCalls === 1, `resource fetch must run once (no pay retry), got ${resourceCalls}`);
+  assert(intelCalls >= 1, "intel must be consulted on 402");
+  const refuse = threw.refuse ?? getLastRefuse();
+  assert(refuse?.schema === "twzrd.gate_eval_refuse.v1", `schema ${refuse?.schema}`);
+  assert(refuse.signer_invocation_count === 0, "signer_invocation_count");
+  assert(refuse.usdc_spent === 0, "usdc_spent");
+  assert(refuse.closes_external_adoption_metric === false, "must not claim EXTERNAL_RUN");
+});
+
+await t("T14 HTTP 200 never calls intel", async () => {
+  let intelCalls = 0;
+  const innerFetch = async () =>
+    new Response("ok", { status: 200, headers: { "content-type": "text/plain" } });
+  const intelFetch = async () => {
+    intelCalls += 1;
+    throw new Error("intel must not be called on 200");
+  };
+  const gated = wrapFetchWithTwzrdPreflight(innerFetch, { fetch: intelFetch });
+  const resp = await gated("https://example.com/ok");
+  assert(resp.status === 200, `status ${resp.status}`);
+  assert(intelCalls === 0, `intelCalls ${intelCalls}`);
+});
+
+await t("T15 default createGate is fail-closed without passing failMode", async () => {
+  const g = createGate({ endpoint: "http://127.0.0.1:9", timeoutMs: 800 }, QUIET);
+  const r = await g.beforeToolCall({
+    toolName: "exec",
+    params: { command: curlCmd(UNKNOWN_WALLET, "X", 0.05) },
+  });
+  assert(r?.block === true, `default fail-closed must block, got ${JSON.stringify(r)}`);
+});
+
+await t("T16 plugin empty config registers enforce (not shadow)", async () => {
+  const { api, hooks } = makeOpenClawApiStub({});
+  plugin.register(api);
+  assert(typeof hooks.before_tool_call === "function", "hook registered");
+});
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail === 0 ? 0 : 1);
