@@ -533,10 +533,6 @@ await t("T16 plugin empty config registers enforce (not shadow)", async () => {
 const WASH_PAYTO = "WashWashWashWashWashWashWashWashWashWash1111";
 const WASH_RESOURCE = "https://seller.example/x402/item";
 
-function encodePaymentRequiredHeader(accepts) {
-  return Buffer.from(JSON.stringify({ accepts }), "utf8").toString("base64");
-}
-
 function makeWashIntelFetch(counter) {
   return async (input, init) => {
     counter.intelCalls += 1;
@@ -574,58 +570,14 @@ await t("T17 installed twzrd-x402-gate is exact 0.9.7 + 0.9.7 APIs export", asyn
     typeof gatePkg.bin?.["twzrd-gate-eval-refuse"] === "string",
     "refuse binary declared in gate package.json",
   );
+  const wrapSrc = await readFile(new URL("../wrap-fetch.js", import.meta.url), "utf8");
+  assert(
+    !wrapSrc.includes("paymentRequiredFromResponse"),
+    "wrap-fetch must not import paymentRequiredFromResponse (not a 0.9.7 package export)",
+  );
 });
 
-await t("T18 header-only 402 wash payTo throws via 0.9.7 paymentRequiredFromResponse", async () => {
-  resetLastRefuse();
-  const counter = { intelCalls: 0 };
-  let resourceCalls = 0;
-  const innerFetch = async (input) => {
-    const url = typeof input === "string" ? input : input.url;
-    if (url.startsWith(WASH_RESOURCE) || url.includes("seller.example")) {
-      resourceCalls += 1;
-      return new Response("", {
-        status: 402,
-        headers: {
-          "PAYMENT-REQUIRED": encodePaymentRequiredHeader([
-            {
-              scheme: "exact",
-              network: "solana",
-              payTo: WASH_PAYTO,
-              maxAmountRequired: "50000",
-              resource: WASH_RESOURCE,
-            },
-          ]),
-        },
-      });
-    }
-    throw new Error(`inner fetch unexpected url ${url}`);
-  };
-  const gated = wrapFetchWithTwzrdPreflight(innerFetch, {
-    fetch: makeWashIntelFetch(counter),
-    refuseWashFlagged: true,
-    failMode: "closed",
-    endpoint: "https://intel.twzrd.xyz",
-  });
-  let threw = null;
-  try {
-    await gated(WASH_RESOURCE);
-    resourceCalls += 1;
-    await gated(WASH_RESOURCE, { headers: { "PAYMENT-SIGNATURE": "would-sign" } });
-  } catch (err) {
-    threw = err;
-  }
-  assert(threw instanceof TwzrdPaymentBlockedError, `expected TwzrdPaymentBlockedError, got ${threw}`);
-  assert(resourceCalls === 1, `resource fetch must run once (no pay retry), got ${resourceCalls}`);
-  assert(counter.intelCalls >= 1, "intel must be consulted on header 402");
-  const refuse = threw.refuse ?? getLastRefuse();
-  assert(refuse?.schema === "twzrd.gate_eval_refuse.v1", `schema ${refuse?.schema}`);
-  assert(refuse.signer_invocation_count === 0, "signer_invocation_count");
-  assert(refuse.usdc_spent === 0, "usdc_spent");
-  assert(refuse.closes_external_adoption_metric === false, "must not claim EXTERNAL_RUN");
-});
-
-await t("T19 createTwzrdBeforePaymentHook wash abort (injected; no signer / no USDC)", async () => {
+await t("T18 createTwzrdBeforePaymentHook wash abort (injected; no signer / no USDC)", async () => {
   const counter = { intelCalls: 0 };
   const hook = createTwzrdBeforePaymentHook({
     fetch: makeWashIntelFetch(counter),
@@ -645,7 +597,7 @@ await t("T19 createTwzrdBeforePaymentHook wash abort (injected; no signer / no U
   assert(counter.intelCalls >= 1, "hook must consult intel");
 });
 
-await t("T20 refuse binary present; missing-peer spawn is exit 2 (not a live dogfood run)", async () => {
+await t("T19 refuse binary present; missing-peer spawn is exit 2 (not a live dogfood run)", async () => {
   const bin = path.join(
     fileURLToPath(new URL("../", import.meta.url)),
     "node_modules",

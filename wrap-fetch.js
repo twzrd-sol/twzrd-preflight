@@ -6,12 +6,14 @@
  * before the caller can attach a payment / invoke a signer. Non-402 responses
  * pass through with no intel call.
  *
- * Uses paymentRequiredFromResponse + twzrdApprovePayment / refuseWashFlagged.
- * createTwzrdBeforePaymentHook is the PayAI beforePayment seat — not this wrap.
+ * Public 0.9.7 APIs used here: pickRequirements, payToFromRequirements,
+ * priceUsdcFromAmountMicro, resolveConfig, twzrdApprovePayment.
+ * paymentRequiredFromResponse exists in gate dist/payto but is not a package
+ * export — do not import it. createTwzrdBeforePaymentHook is the PayAI
+ * beforePayment seat, not this wrap.
  */
 import {
   payToFromRequirements,
-  paymentRequiredFromResponse,
   pickRequirements,
   priceUsdcFromAmountMicro,
   resolveConfig,
@@ -107,10 +109,12 @@ export function wrapFetchWithTwzrdPreflight(innerFetch, opts = {}) {
     const resp = await innerFetch(input, init);
     if (resp.status !== 402) return resp;
 
-    // 0.9.7 API: PAYMENT-REQUIRED header first, then JSON body (same precedence
-    // as @x402/core). Undecodable header throws fail-closed from the gate.
-    const body = await paymentRequiredFromResponse(resp);
-    if (body === null) return resp;
+    let body = {};
+    try {
+      body = await resp.clone().json();
+    } catch {
+      return resp;
+    }
 
     const first = pickRequirements(body.accepts);
     const { payTo, resource, amountMicro } = payToFromRequirements(first);
