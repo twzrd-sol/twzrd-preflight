@@ -570,9 +570,10 @@ await t("T17 installed twzrd-x402-gate is exact 0.9.7 + 0.9.7 APIs export", asyn
     typeof gatePkg.bin?.["twzrd-gate-eval-refuse"] === "string",
     "refuse binary declared in gate package.json",
   );
-  const wrapSrc = await readFile(new URL("../wrap-fetch.js", import.meta.url), "utf8");
+  const wrapRaw = await readFile(new URL("../wrap-fetch.js", import.meta.url), "utf8");
+  const wrapCode = wrapRaw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
   assert(
-    !wrapSrc.includes("paymentRequiredFromResponse"),
+    !/\bpaymentRequiredFromResponse\b/.test(wrapCode),
     "wrap-fetch must not import paymentRequiredFromResponse (not a 0.9.7 package export)",
   );
 });
@@ -584,7 +585,7 @@ await t("T18 createTwzrdBeforePaymentHook wash abort (injected; no signer / no U
     refuseWashFlagged: true,
     failOpen: false,
     intelBase: "https://intel.twzrd.xyz",
-    attribution: { integration: "twzrd-preflight-harness", runId: "t19-hook-wash" },
+    attribution: { integration: "twzrd-preflight-harness", runId: "t18-hook-wash" },
   });
   const result = await hook({
     payTo: WASH_PAYTO,
