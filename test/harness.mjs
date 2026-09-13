@@ -6,6 +6,7 @@ import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { spawnSync } from "node:child_process";
 import {
   createGate,
   DEFAULTS,
@@ -15,6 +16,10 @@ import {
   TwzrdPaymentBlockedError,
 } from "../index.js";
 import plugin from "../index.js";
+import {
+  CLIENT_VERSION as GATE_CLIENT_VERSION,
+  createTwzrdBeforePaymentHook,
+} from "twzrd-x402-gate";
 
 /** Concatenate every .d.ts under a dir (one level deep is enough for openclaw/dist). */
 async function collectDts(dir) {
@@ -401,8 +406,9 @@ await t("T12 factory defaults are enforce + fail-closed + wash refuse", async ()
   const pluginManifest = JSON.parse(
     await readFile(new URL("../openclaw.plugin.json", import.meta.url), "utf8"),
   );
-  assert(pkg.version === "0.2.0", `package.json version ${pkg.version}`);
-  assert(pluginManifest.version === "0.2.0", `plugin manifest version ${pluginManifest.version}`);
+  assert(pkg.version === "0.3.0", `package.json version ${pkg.version}`);
+  assert(pluginManifest.version === "0.3.0", `plugin manifest version ${pluginManifest.version}`);
+  assert(pkg.dependencies?.["twzrd-x402-gate"] === "0.9.7", `gate pin ${pkg.dependencies?.["twzrd-x402-gate"]}`);
   assert(pluginManifest.configSchema.properties.mode.default === "enforce", "manifest mode default");
   assert(
     pluginManifest.configSchema.properties.failMode.default === "closed",
@@ -522,6 +528,140 @@ await t("T16 plugin empty config registers enforce (not shadow)", async () => {
   const { api, hooks } = makeOpenClawApiStub({});
   plugin.register(api);
   assert(typeof hooks.before_tool_call === "function", "hook registered");
+});
+
+const WASH_PAYTO = "WashWashWashWashWashWashWashWashWashWash1111";
+const WASH_RESOURCE = "https://seller.example/x402/item";
+
+function encodePaymentRequiredHeader(accepts) {
+  return Buffer.from(JSON.stringify({ accepts }), "utf8").toString("base64");
+}
+
+function makeWashIntelFetch(counter) {
+  return async (input, init) => {
+    counter.intelCalls += 1;
+    const url = typeof input === "string" ? input : input.url;
+    if (String(init?.method ?? "GET").toUpperCase() === "POST" && url.includes("/preflight")) {
+      return new Response(
+        JSON.stringify({
+          readiness_card: {
+            decision: "warn",
+            trust_score: 50,
+            can_spend: false,
+            seller_wallet: WASH_PAYTO,
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    if (url.includes("/merchant_card/")) {
+      return new Response(JSON.stringify({ wash_flagged: true, merchant: WASH_PAYTO }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    throw new Error(`intel fetch unexpected ${init?.method} ${url}`);
+  };
+}
+
+await t("T17 installed twzrd-x402-gate is exact 0.9.7 + 0.9.7 APIs export", async () => {
+  const dir = path.join(fileURLToPath(new URL("../", import.meta.url)), "node_modules", "twzrd-x402-gate");
+  const gatePkg = JSON.parse(await readFile(path.join(dir, "package.json"), "utf8"));
+  assert(gatePkg.version === "0.9.7", `installed gate ${gatePkg.version}`);
+  assert(GATE_CLIENT_VERSION === "0.9.7", `CLIENT_VERSION ${GATE_CLIENT_VERSION}`);
+  assert(typeof createTwzrdBeforePaymentHook === "function", "createTwzrdBeforePaymentHook export");
+  assert(
+    typeof gatePkg.bin?.["twzrd-gate-eval-refuse"] === "string",
+    "refuse binary declared in gate package.json",
+  );
+});
+
+await t("T18 header-only 402 wash payTo throws via 0.9.7 paymentRequiredFromResponse", async () => {
+  resetLastRefuse();
+  const counter = { intelCalls: 0 };
+  let resourceCalls = 0;
+  const innerFetch = async (input) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (url.startsWith(WASH_RESOURCE) || url.includes("seller.example")) {
+      resourceCalls += 1;
+      return new Response("", {
+        status: 402,
+        headers: {
+          "PAYMENT-REQUIRED": encodePaymentRequiredHeader([
+            {
+              scheme: "exact",
+              network: "solana",
+              payTo: WASH_PAYTO,
+              maxAmountRequired: "50000",
+              resource: WASH_RESOURCE,
+            },
+          ]),
+        },
+      });
+    }
+    throw new Error(`inner fetch unexpected url ${url}`);
+  };
+  const gated = wrapFetchWithTwzrdPreflight(innerFetch, {
+    fetch: makeWashIntelFetch(counter),
+    refuseWashFlagged: true,
+    failMode: "closed",
+    endpoint: "https://intel.twzrd.xyz",
+  });
+  let threw = null;
+  try {
+    await gated(WASH_RESOURCE);
+    resourceCalls += 1;
+    await gated(WASH_RESOURCE, { headers: { "PAYMENT-SIGNATURE": "would-sign" } });
+  } catch (err) {
+    threw = err;
+  }
+  assert(threw instanceof TwzrdPaymentBlockedError, `expected TwzrdPaymentBlockedError, got ${threw}`);
+  assert(resourceCalls === 1, `resource fetch must run once (no pay retry), got ${resourceCalls}`);
+  assert(counter.intelCalls >= 1, "intel must be consulted on header 402");
+  const refuse = threw.refuse ?? getLastRefuse();
+  assert(refuse?.schema === "twzrd.gate_eval_refuse.v1", `schema ${refuse?.schema}`);
+  assert(refuse.signer_invocation_count === 0, "signer_invocation_count");
+  assert(refuse.usdc_spent === 0, "usdc_spent");
+  assert(refuse.closes_external_adoption_metric === false, "must not claim EXTERNAL_RUN");
+});
+
+await t("T19 createTwzrdBeforePaymentHook wash abort (injected; no signer / no USDC)", async () => {
+  const counter = { intelCalls: 0 };
+  const hook = createTwzrdBeforePaymentHook({
+    fetch: makeWashIntelFetch(counter),
+    refuseWashFlagged: true,
+    failOpen: false,
+    intelBase: "https://intel.twzrd.xyz",
+    attribution: { integration: "twzrd-preflight-harness", runId: "t19-hook-wash" },
+  });
+  const result = await hook({
+    payTo: WASH_PAYTO,
+    network: "solana",
+    maxAmountRequired: "50000",
+    resource: WASH_RESOURCE,
+  });
+  assert(result?.abort === true, `expected abort, got ${JSON.stringify(result)}`);
+  assert(/wash/i.test(result.reason ?? ""), `reason should cite wash, got ${result.reason}`);
+  assert(counter.intelCalls >= 1, "hook must consult intel");
+});
+
+await t("T20 refuse binary present; missing-peer spawn is exit 2 (not a live dogfood run)", async () => {
+  const bin = path.join(
+    fileURLToPath(new URL("../", import.meta.url)),
+    "node_modules",
+    "twzrd-x402-gate",
+    "bin",
+    "twzrd-gate-eval-refuse.js",
+  );
+  const src = await readFile(bin, "utf8");
+  assert(src.includes("twzrd.gate_eval_refuse.v1"), "refuse bin must emit gate_eval_refuse.v1");
+  assert(
+    src.includes("closes_external_adoption_metric: false"),
+    "refuse bin must not claim EXTERNAL_RUN",
+  );
+  const ran = spawnSync(process.execPath, [bin], { encoding: "utf8" });
+  assert(ran.status === 2, `expected missing-peer exit 2, got ${ran.status}\n${ran.stderr}`);
+  assert(/missing peer/.test(ran.stderr ?? ""), `stderr should cite missing peer: ${ran.stderr}`);
 });
 
 console.log(`\n${pass} passed, ${fail} failed`);

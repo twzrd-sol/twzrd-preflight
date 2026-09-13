@@ -1,15 +1,17 @@
 /**
  * HTTP 402 intercept for twzrd-preflight.
  *
- * Thin wrapper around twzrd-x402-gate policy (wrap-equivalent): on 402, evaluate
- * payTo via preflight + merchant_card wash refuse. Denied 402s throw before the
- * caller can attach a payment / invoke a signer. Non-402 responses pass through
- * with no intel call.
+ * Thin wrapper around twzrd-x402-gate@0.9.7 policy (wrap-equivalent): on 402,
+ * evaluate payTo via preflight + merchant_card wash refuse. Denied 402s throw
+ * before the caller can attach a payment / invoke a signer. Non-402 responses
+ * pass through with no intel call.
  *
- * Does not reimplement wash scoring — uses twzrdApprovePayment / refuseWashFlagged.
+ * Uses paymentRequiredFromResponse + twzrdApprovePayment / refuseWashFlagged.
+ * createTwzrdBeforePaymentHook is the PayAI beforePayment seat — not this wrap.
  */
 import {
   payToFromRequirements,
+  paymentRequiredFromResponse,
   pickRequirements,
   priceUsdcFromAmountMicro,
   resolveConfig,
@@ -105,12 +107,10 @@ export function wrapFetchWithTwzrdPreflight(innerFetch, opts = {}) {
     const resp = await innerFetch(input, init);
     if (resp.status !== 402) return resp;
 
-    let body = {};
-    try {
-      body = await resp.clone().json();
-    } catch {
-      return resp;
-    }
+    // 0.9.7 API: PAYMENT-REQUIRED header first, then JSON body (same precedence
+    // as @x402/core). Undecodable header throws fail-closed from the gate.
+    const body = await paymentRequiredFromResponse(resp);
+    if (body === null) return resp;
 
     const first = pickRequirements(body.accepts);
     const { payTo, resource, amountMicro } = payToFromRequirements(first);
