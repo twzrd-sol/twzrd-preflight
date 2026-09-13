@@ -143,7 +143,7 @@ or full params are forwarded. The endpoint is configurable.
 ## Test
 
 ```bash
-npm test    # harness; live FREE preflight cases + injected 402/0.9.7 API smoke (no auth, no payments)
+npm test    # 25 passed (live FREE preflight + injected 402 / 0.9.7 API smoke; no auth, no payments)
 ```
 
 Verified against OpenClaw **2026.7.1-2** (`openclaw.build.openclawVersion` + T10c).
