@@ -1,7 +1,7 @@
 {
   "name": "twzrd-preflight",
-  "version": "0.2.0",
-  "description": "TWZRD OpenClaw plugin 0.2.0: wrapFetchWithTwzrdPreflight intercepts HTTP 402 (wash refuse, fail-closed, enforce). Also gates payment-shaped tool calls. Shadow/fail-open/wash-off are opt-in.",
+  "version": "0.3.0",
+  "description": "TWZRD OpenClaw plugin 0.3.0: wrapFetchWithTwzrdPreflight intercepts HTTP 402 (wash refuse, fail-closed, enforce) on twzrd-x402-gate@0.9.7. Also gates payment-shaped tool calls. Shadow/fail-open/wash-off are opt-in.",
   "type": "module",
   "main": "index.js",
   "bin": {
@@ -26,7 +26,7 @@
     "README.md"
   ],
   "dependencies": {
-    "twzrd-x402-gate": "^0.8.19"
+    "twzrd-x402-gate": "0.9.7"
   },
   "scripts": {
     "test": "node test/harness.mjs"

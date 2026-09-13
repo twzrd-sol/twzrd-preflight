@@ -1,6 +1,7 @@
 # twzrd-preflight
 
-OpenClaw plugin **0.2.0**: install = intercept.
+OpenClaw plugin **0.3.0**: install = intercept. Pin **`twzrd-x402-gate@0.9.7`**
+(exact; same line as other TWZRD seats).
 
 `wrapFetchWithTwzrdPreflight` runs TWZRD preflight + merchant_card **wash refuse**
 on every HTTP **402** before a signer can attach payment. Defaults: **enforce**,
@@ -32,6 +33,7 @@ wallet it scored.
 
 ```bash
 npm install twzrd-preflight
+# depends on twzrd-x402-gate@0.9.7 (exact)
 ```
 
 Register in your OpenClaw config:
@@ -51,7 +53,8 @@ const fetch = wrapFetchWithTwzrdPreflight(globalThis.fetch);
 
 A wash-flagged `payTo` **throws** `TwzrdPaymentBlockedError` with
 `error.refuse.schema === "twzrd.gate_eval_refuse.v1"` (`signer_invocation_count: 0`,
-`usdc_spent: 0`). Mechanism proof, not an EXTERNAL_RUN.
+`usdc_spent: 0`, `closes_external_adoption_metric: false`). Mechanism / harness
+proof, not an EXTERNAL_RUN. No invented ALLOW txs.
 
 ## Configuration
 
@@ -127,7 +130,7 @@ Built-in coverage: AgentCash MCP tools + exec/curl x402 payments. For other paym
 - Block iff `decision === "block"`. Never gates on `can_spend` (unknown wallets score warn/45,
   which is allowed by default).
 - `shadow` mode: evaluates + logs would-blocks, never blocks.
-- Fail-open by default: trust API unreachable = allow (`failMode: "closed"` reverses this).
+- Fail-closed by default: trust API unreachable = block (`failMode: "open"` is opt-in allow).
 - Local policy (denylist, allowlist, price cap) runs without any API call.
 - Loop guard: calls to the trust API itself are never gated.
 
@@ -140,10 +143,12 @@ or full params are forwarded. The endpoint is configurable.
 ## Test
 
 ```bash
-npm test    # 13-case harness; hits the live FREE preflight (no auth, no payments)
+npm test    # 25 passed (live FREE preflight + injected 402 / 0.9.7 API smoke; no auth, no payments)
 ```
 
-Verified against OpenClaw 2026.3.13.
+Verified against OpenClaw **2026.7.1-2** (`openclaw.build.openclawVersion` + T10c).
+Gate pin: `twzrd-x402-gate@0.9.7`. Refuse-bin spawn without `@x402/*` peers is a
+missing-peer fail (exit 2), not a live dogfood EXTERNAL_RUN.
 
 ## CLI
 
