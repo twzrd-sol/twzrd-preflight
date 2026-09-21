@@ -9,20 +9,20 @@ on every HTTP **402** before a signer can attach payment. Defaults: **enforce**,
 
 Also gates payment-shaped OpenClaw tool calls (`before_tool_call`).
 
-**Check the seller before you pay:** free ReadinessCard first, then buy a portable signed V6
+**Check the seller before you pay:** free ReadinessCard first, then buy a portable signed V7
 trust receipt only when you need deeper evidence.
 
 ```bash
 npx twzrd-preflight <wallet-or-x402-url>
 ```
 
-## Paid escalation ($0.05 signed V6 receipt)
+## Paid escalation ($0.05 signed V7 receipt)
 
 The free card is a corpus teaser. When the decision is `warn` and you need the full renorm
 score plus a portable signed receipt, the card prints the paid route:
 
 - `GET https://intel.twzrd.xyz/v1/intel/trust/{wallet}` — 0.05 USDC via x402 (Solana mainnet):
-  full intel + signed V6 receipt.
+  full intel + signed V7 receipt (V5 and V6 receipts still verify).
 - `GET https://intel.twzrd.xyz/v1/intel/quick/{wallet}` — 0.001 USDC quick tier: score only,
   no receipt.
 
