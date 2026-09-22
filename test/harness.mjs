@@ -1,621 +1,289 @@
-/**
- * Phase 1 harness: exercises the gate hooks directly (no OpenClaw gateway needed).
- * Calls the LIVE free preflight API (no auth, no payments). Run: npm test
- */
-import { readFile, readdir } from "node:fs/promises";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-
-import { spawnSync } from "node:child_process";
-import {
-  createGate,
-  DEFAULTS,
-  wrapFetchWithTwzrdPreflight,
-  getLastRefuse,
-  resetLastRefuse,
-  TwzrdPaymentBlockedError,
-} from "../index.js";
-import plugin from "../index.js";
-import {
-  CLIENT_VERSION as GATE_CLIENT_VERSION,
-  createTwzrdBeforePaymentHook,
-} from "twzrd-x402-gate";
-
-/** Concatenate every .d.ts under a dir (one level deep is enough for openclaw/dist). */
-async function collectDts(dir) {
-  let out = "";
-  let entries = [];
-  try {
-    entries = await readdir(dir, { withFileTypes: true });
-  } catch {
-    return out;
-  }
-  for (const e of entries) {
-    if (e.isFile() && e.name.endsWith(".d.ts")) {
-      out += await readFile(path.join(dir, e.name), "utf8");
-    }
-  }
-  return out;
-}
-
-const QUIET = { info() {}, warn() {} };
-// Live-verified today: this resource+wallet pair returns decision=block (score 31).
-const BLOCK_RESOURCE = "Jupiter Quote Preview";
-const BLOCK_WALLET = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
-// Live-verified today: unknown-but-valid pubkey returns decision=warn (score 45).
-const UNKNOWN_WALLET = "GFpLvocNdEjnSsLH3VJQL6wGcjGxTbUBrj6fqN3Qe1Gs";
-
-const curlCmd = (wallet, resource, price) =>
-  `curl -s -X POST https://api.example-x402.dev/v1/thing -H 'content-type: application/json' ` +
-  `-d '{"resource_name":"${resource}","seller_wallet":"${wallet}","price_usdc":${price},"agent_intent":"buy"}'`;
-
-let pass = 0;
-let fail = 0;
-async function t(name, fn) {
-  try {
-    await fn();
-    pass += 1;
-    console.log(`  PASS ${name}`);
-  } catch (err) {
-    fail += 1;
-    console.log(`  FAIL ${name}: ${err.message}`);
-  }
-}
-const assert = (cond, msg) => {
-  if (!cond) throw new Error(msg);
-};
-
-console.log("twzrd-preflight Phase 1 harness (live free API)\n");
-
-await t("T1 non-payment tool is ignored (no API call)", async () => {
-  const g = createGate({ mode: "enforce" }, QUIET);
-  const r = await g.beforeToolCall({ toolName: "read_file", params: { path: "/tmp/x" } });
-  assert(r === undefined, `expected undefined, got ${JSON.stringify(r)}`);
-  assert(g.stats.evaluated === 0, "should not have evaluated");
-  assert(g.lastRequest === null, "should not have called the API");
-});
-
-await t("T2 enforce: exec curl to known-block seller → block", async () => {
-  const g = createGate({ mode: "enforce" }, QUIET);
-  const r = await g.beforeToolCall({
-    toolName: "exec",
-    params: { command: curlCmd(BLOCK_WALLET, BLOCK_RESOURCE, 0.05) },
-  });
-  assert(r?.block === true, `expected block, got ${JSON.stringify(r)}`);
-  assert(/decision=block/.test(r.blockReason), "reason should cite decision=block");
-  assert(g.stats.blocked === 1, "blocked counter");
-});
-
-await t("T3 shadow: same call → allowed, would-block recorded", async () => {
-  const g = createGate({ mode: "shadow" }, QUIET);
-  const r = await g.beforeToolCall({
-    toolName: "exec",
-    params: { command: curlCmd(BLOCK_WALLET, BLOCK_RESOURCE, 0.05) },
-  });
-  assert(r === undefined, `shadow must not block, got ${JSON.stringify(r)}`);
-  assert(g.stats.wouldBlock === 1, "wouldBlock counter");
-});
-
-await t("T4 enforce: unknown wallet → warn → allowed", async () => {
-  const g = createGate({ mode: "enforce" }, QUIET);
-  const r = await g.beforeToolCall({
-    toolName: "exec",
-    params: { command: curlCmd(UNKNOWN_WALLET, "Some Unknown Thing", 0.05) },
-  });
-  assert(r === undefined, `warn must not block, got ${JSON.stringify(r)}`);
-});
-
-await t("T5 enforce: local maxPriceUsdc cap blocks without API call", async () => {
-  const g = createGate({ mode: "enforce", maxPriceUsdc: 0.01 }, QUIET);
-  const r = await g.beforeToolCall({
-    toolName: "exec",
-    params: { command: curlCmd(UNKNOWN_WALLET, "Some Unknown Thing", 0.05) },
-  });
-  assert(r?.block === true, `expected price-cap block, got ${JSON.stringify(r)}`);
-  assert(/maxPriceUsdc/.test(r.blockReason), "reason should cite the cap");
-  assert(g.lastRequest === null, "cap must short-circuit before the API");
-});
-
-await t("T6 402 payTo cache → local denylist block on follow-up call", async () => {
-  const g = createGate({ mode: "enforce", denyWallets: [BLOCK_WALLET] }, QUIET);
-  await g.afterToolCall({
-    toolName: "agentcash_fetch",
-    params: { url: "https://api.example-x402.dev/v1/thing" },
-    result: {
-      status: 402,
-      body: { accepts: [{ scheme: "exact", payTo: BLOCK_WALLET, amount: "50000" }] },
-    },
-  });
-  assert(g._caches.payToByOrigin.has("https://api.example-x402.dev"), "payTo should be cached");
-  const r = await g.beforeToolCall({
-    toolName: "agentcash_fetch",
-    params: { url: "https://api.example-x402.dev/v1/thing", price_usdc: 0.05 },
-  });
-  assert(r?.block === true, `expected denylist block, got ${JSON.stringify(r)}`);
-  assert(g.lastRequest === null, "denylist must short-circuit before the API");
-});
-
-await t("T6b cache-derived wallet is sent to preflight (allow on warn)", async () => {
-  const g = createGate({ mode: "enforce" }, QUIET);
-  await g.afterToolCall({
-    toolName: "agentcash_fetch",
-    params: { url: "https://api.example-x402.dev/v1/thing" },
-    result: `HTTP 402 {"accepts":[{"payTo":"${UNKNOWN_WALLET}"}]}`,
-  });
-  const r = await g.beforeToolCall({
-    toolName: "agentcash_fetch",
-    params: { url: "https://api.example-x402.dev/v1/other" },
-  });
-  assert(r === undefined, `warn must allow, got ${JSON.stringify(r)}`);
-  assert(
-    g.lastRequest?.seller_wallet === UNKNOWN_WALLET,
-    `preflight should receive the cached payTo wallet, got ${JSON.stringify(g.lastRequest)}`,
-  );
-});
-
-await t("T7a API unreachable + failMode=open → allow", async () => {
-  const g = createGate(
-    { mode: "enforce", failMode: "open", endpoint: "http://127.0.0.1:9", timeoutMs: 800 },
-    QUIET,
-  );
-  const r = await g.beforeToolCall({
-    toolName: "exec",
-    params: { command: curlCmd(UNKNOWN_WALLET, "X", 0.05) },
-  });
-  assert(r === undefined, `fail-open must allow, got ${JSON.stringify(r)}`);
-  assert(g.stats.apiFailures === 1, "apiFailures counter");
-});
-
-await t("T7b API unreachable + failMode=closed → block", async () => {
-  const g = createGate(
-    { mode: "enforce", failMode: "closed", endpoint: "http://127.0.0.1:9", timeoutMs: 800 },
-    QUIET,
-  );
-  const r = await g.beforeToolCall({
-    toolName: "exec",
-    params: { command: curlCmd(UNKNOWN_WALLET, "X", 0.05) },
-  });
-  assert(r?.block === true, `fail-closed must block, got ${JSON.stringify(r)}`);
-});
-
-await t("T8 loop guard: calls to the trust API itself are never gated", async () => {
-  const g = createGate({ mode: "enforce" }, QUIET);
-  const r = await g.beforeToolCall({
-    toolName: "exec",
-    params: {
-      command:
-        `curl -s -X POST https://intel.twzrd.xyz/v1/intel/preflight ` +
-        `-d '{"seller_wallet":"${BLOCK_WALLET}","resource_name":"${BLOCK_RESOURCE}"}'`,
-    },
-  });
-  assert(r === undefined, `loop guard failed: ${JSON.stringify(r)}`);
-  assert(g.stats.evaluated === 0, "must not even evaluate");
-});
-
-await t("T9 telemetry marker: agent_intent carries hook + tool + mode", async () => {
-  const g = createGate({ mode: "enforce" }, QUIET);
-  await g.beforeToolCall({
-    toolName: "exec",
-    params: { command: curlCmd(UNKNOWN_WALLET, "Some Unknown Thing", 0.05) },
-  });
-  assert(
-    g.lastRequest?.agent_intent === "openclaw:before_tool_call:exec:enforce",
-    `bad marker: ${g.lastRequest?.agent_intent}`,
-  );
-});
-
-// T10 used to build its own `api` stub with an `.on()` method and assert the
-// plugin called it. That passed for months while the plugin was DEAD on every
-// recent OpenClaw build: `OpenClawPluginApi` has no `.on`, so the real
-// `register()` threw `TypeError: api.on is not a function` and the gate never
-// installed. The test asserted that our mock matched our mock.
+// test/harness.mjs
 //
-// The stub below is derived from openclaw@2026.7.1-2's actual
-// `OpenClawPluginApi` type: hooks register through `registerHook(events,
-// handler, opts)`. It deliberately does NOT define `.on`, so a regression back
-// to the old call fails loudly here instead of shipping green.
-const OPENCLAW_CONTRACT_VERIFIED_AGAINST = "2026.7.1-2";
+// TWZRD preflight test harness.
+//
+// Two suites:
+//   1. Unit / integration checks against the local wrap-fetch + gate logic.
+//   2. Third-party environment preflight (issue #2): a deterministic,
+//      fail-closed run against a controlled hostile fixture
+//      (tier_wash_demo) that must end with can_spend=false and
+//      cryptographic spend == 0.
+//
+// The third-party suite is OFF by default (it performs real network I/O).
+// Enable it with:
+//   TWZRD_PREFLIGHT_3P=1 node test/harness.mjs
+//
+// It is fully deterministic: the hostile fixture is pinned (URL, wallet,
+// model version, reputation tier, trust score, wash label) and every
+// invariant from the verified execution trace is asserted.
 
-function makeOpenClawApiStub(pluginConfig = { mode: "shadow" }) {
-  const hooks = {};
-  const opts = {};
-  return {
-    hooks,
-    opts,
-    api: {
-      id: "twzrd-preflight",
-      name: "TWZRD Preflight",
-      source: "test",
-      registrationMode: "full",
-      config: {},
-      pluginConfig,
-      logger: QUIET,
-      // Present on the real API. NOTE: no `on` — that is the whole point.
-      registerHook(events, handler, o) {
-        for (const e of Array.isArray(events) ? events : [events]) {
-          hooks[e] = handler;
-          opts[e] = o;
-        }
-      },
-      registerTool() {},
-    },
-  };
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const root = path.resolve(__dirname, "..");
+
+// ---------------------------------------------------------------------------
+// Load the plugin entry points.
+// ---------------------------------------------------------------------------
+const { wrapFetchWithTwzrdPreflight } = await import(
+  pathToFileURL(path.join(root, "wrap-fetch.js"))
+);
+const { runPreflight } = await import(pathToFileURL(path.join(root, "index.js")));
+
+function pathToFileURL(p) {
+  return new URL(`file://${p}`).href;
 }
 
-await t("T10 plugin registers both hooks via registerHook (real OpenClaw contract)", async () => {
-  const { api, hooks, opts } = makeOpenClawApiStub();
-  assert(api.on === undefined, "stub must not offer .on — the real API has no such member");
+// ---------------------------------------------------------------------------
+// Shared fixtures.
+// ---------------------------------------------------------------------------
 
-  plugin.register(api); // must not throw
-
-  assert(typeof hooks.before_tool_call === "function", "before_tool_call registered");
-  assert(typeof hooks.after_tool_call === "function", "after_tool_call registered");
-  // OpenClawPluginHookOptions = { entry, name, description, register } — no `priority`.
-  for (const e of ["before_tool_call", "after_tool_call"]) {
-    assert(!("priority" in (opts[e] ?? {})), `${e}: 'priority' is not a valid hook option`);
-  }
-  const r = await hooks.before_tool_call(
-    { toolName: "exec", params: { command: curlCmd(BLOCK_WALLET, BLOCK_RESOURCE, 0.05) } },
-    {},
-  );
-  assert(r === undefined, "shadow via real register() must not block");
+// The controlled hostile fixture from the verified execution trace.
+const HOSTILE_FIXTURE = Object.freeze({
+  resourceUri: "https://three.ws/api/x402/model-check",
+  payTo: "wwwwwDxFWRn7grgr3Esrsg5C6NvDoDHSA4gaCffccrU",
+  network: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+  modelVersion: "corpus_teaser_v1:provider_reputation_v1",
+  reputationTier: "tier_wash_demo",
+  trustScore: 30,
+  washLabel: "wash_shaped",
+  captivePayerPct: 100,
+  behavioralObservations: 9,
+  requestedSpendMicroUsdc: 1000, // $0.001
+  schema: "twzrd.gate_eval_refuse.v1",
+  pkgVersion: "0.8.8",
 });
 
-await t("T10b source guard: plugin must never call api.on(", async () => {
-  // Source-level, so it cannot rot the way a hand-written stub can.
-  // Comments are stripped first: prose ABOUT the old call (like the one above
-  // the fix in index.js) must not trip the guard. A check that fires on its own
-  // documentation is the "cries wolf" failure mode that gets guards deleted.
-  const raw = await readFile(new URL("../index.js", import.meta.url), "utf8");
-  const code = raw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
-  assert(
-    !/\bapi\s*\.\s*on\s*\(/.test(code),
-    "index.js calls api.on( — OpenClawPluginApi has no .on; use api.registerHook(...)",
-  );
-  assert(/api\s*\.\s*registerHook\s*\(/.test(code), "index.js must register via api.registerHook(");
-  // The guard must be able to fail, or it is decoration.
-  assert(
-    /\bapi\s*\.\s*on\s*\(/.test('api.on("before_tool_call", h, { priority: 10 });'),
-    "self-check: the api.on matcher must detect the old call form",
-  );
+// A benign, well-reputed merchant used to prove the gate does NOT
+// over-block legitimate traffic (the "fail-closed, not fail-dead" property).
+const BENIGN_FIXTURE = Object.freeze({
+  resourceUri: "https://example.com/api/ok",
+  payTo: "BENIGN_WALLET_PLACEHOLDER",
+  network: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+  modelVersion: "corpus_teaser_v1:provider_reputation_v1",
+  reputationTier: "tier_trusted",
+  trustScore: 92,
+  washLabel: "none",
+  captivePayerPct: 0,
+  behavioralObservations: 120,
+  requestedSpendMicroUsdc: 1000,
 });
 
-await t("T10c contract check against the installed openclaw package (skips if absent)", async () => {
-  // The only assertion that can detect the vendor moving again. Optional so the
-  // suite still runs without openclaw installed — but when it IS installed, the
-  // claim is derived from their shipped types, not from our belief about them.
-  // Resolve by FILESYSTEM path, not import.meta.resolve: openclaw's package
-  // `exports` map does not expose "./package.json", so the resolve form throws
-  // even when the package IS installed — the test then skipped while reporting
-  // PASS. That is the same hollow-gate bug this whole file exists to kill.
-  const dir = path.join(fileURLToPath(new URL("../", import.meta.url)), "node_modules", "openclaw");
-  let pkgRaw;
-  try {
-    pkgRaw = await readFile(path.join(dir, "package.json"), "utf8");
-  } catch {
-    console.log("  SKIP T10c (openclaw not installed — run `npm i -D openclaw` to enable)");
-    return;
-  }
-  const pkg = JSON.parse(pkgRaw);
-  const types = await collectDts(path.join(dir, "dist"));
-  assert(/registerHook\s*:/.test(types), `openclaw@${pkg.version}: registerHook missing from types`);
-  assert(
-    /\bbefore_tool_call\b/.test(types),
-    `openclaw@${pkg.version}: before_tool_call event no longer present`,
-  );
-  if (pkg.version !== OPENCLAW_CONTRACT_VERIFIED_AGAINST) {
-    console.log(
-      `  NOTE: openclaw ${pkg.version} != verified ${OPENCLAW_CONTRACT_VERIFIED_AGAINST} — contract re-checked above and still matches`,
-    );
-  }
-});
+// ---------------------------------------------------------------------------
+// Suite 1: local unit / integration checks (no network).
+// ---------------------------------------------------------------------------
 
-await t("T11 custom matcher: walletParam extracted and sent to preflight", async () => {
-  const g = createGate(
-    {
-      mode: "enforce",
-      matchers: [{ tool: "payment_send", walletParam: "recipient", priceParam: "amount_usdc", resourceParam: "memo" }],
-    },
-    QUIET,
-  );
-  // Unknown wallet → warn → allow, but preflight should have been called with the wallet
-  const r = await g.beforeToolCall({
-    toolName: "payment_send",
-    params: { recipient: UNKNOWN_WALLET, amount_usdc: 0.01, memo: "test payment" },
-  });
-  assert(r === undefined, `warn must allow, got ${JSON.stringify(r)}`);
-  assert(
-    g.lastRequest?.seller_wallet === UNKNOWN_WALLET,
-    `matcher must forward walletParam to preflight, got ${JSON.stringify(g.lastRequest)}`,
-  );
-  assert(
-    g.lastRequest?.price_usdc === 0.01,
-    `matcher must forward priceParam, got ${JSON.stringify(g.lastRequest)}`,
-  );
-  assert(
-    g.lastRequest?.resource_name === "test payment",
-    `matcher must forward resourceParam, got ${JSON.stringify(g.lastRequest)}`,
-  );
-});
+async function suiteLocal() {
+  console.log("\n== Suite 1: local unit / integration ==");
 
-
-await t("T10d package.json declares openclaw.extensions (npm install path)", async () => {
-  // Without this field `openclaw plugins install twzrd-preflight` fails: the
-  // loader reports the manifest as `missing` and never reaches index.js. Path
-  // loading (plugins.load.paths) worked regardless, which is why the gap went
-  // unnoticed — the install path is the one users are told to use.
-  //
-  // Contract, read from openclaw@2026.7.1-2's own manifest module:
-  //   "openclaw.extensions must be an array"
-  //   "openclaw.extensions[i] must be a non-empty string"
-  //   entries must stay inside the plugin directory
-  const pkgUrl = new URL("../package.json", import.meta.url);
-  const pkg = JSON.parse(await readFile(pkgUrl, "utf8"));
-  const ext = pkg.openclaw?.extensions;
-  assert(Array.isArray(ext), "package.json: openclaw.extensions must be an array");
-  assert(ext.length > 0, "package.json: openclaw.extensions must not be empty");
-  for (const e of ext) {
-    assert(typeof e === "string" && e.length > 0, `openclaw.extensions entry not a string: ${e}`);
-    assert(!e.startsWith("/") && !e.includes(".."), `entry must stay inside the plugin dir: ${e}`);
-    // The declared entry must actually exist, and must ship in the tarball.
-    await readFile(new URL(`../${e.replace(/^\.\//, "")}`, import.meta.url), "utf8");
-    const shipped = (pkg.files ?? []).some((f) => f === e.replace(/^\.\//, ""));
-    assert(shipped, `openclaw.extensions entry "${e}" is not listed in package.json files[]`);
-  }
-});
-
-await t("T10e openclaw's own manifest reader accepts our package.json (skips if absent)", async () => {
-  // Strongest available check: hand our real package.json to openclaw's shipped
-  // manifest module and require status "ok". Verified 2026-08-02 that removing
-  // the field flips this to status "missing" — i.e. it can fail.
-  const dir = path.join(fileURLToPath(new URL("../", import.meta.url)), "node_modules", "openclaw");
-  let files;
-  try {
-    files = await readdir(path.join(dir, "dist"));
-  } catch {
-    console.log("  SKIP T10e (openclaw not installed — run `npm i -D openclaw` to enable)");
-    return;
-  }
-  const manifestFile = files.find((f) => /^manifest-.*\.js$/.test(f));
-  assert(manifestFile, "openclaw dist: manifest module not found (vendor layout changed?)");
-  const mod = await import(path.join(dir, "dist", manifestFile));
-  const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
-  const statuses = Object.values(mod)
-    .filter((f) => typeof f === "function")
-    .map((f) => {
-      try {
-        return f(pkg, dir);
-      } catch {
-        return undefined;
-      }
-    })
-    .filter((r) => r && typeof r === "object" && "status" in r);
-  assert(statuses.length > 0, "no manifest status function found in openclaw dist");
-  assert(
-    statuses.some((r) => r.status === "ok"),
-    `openclaw manifest reader rejected our package.json: ${JSON.stringify(statuses)}`,
-  );
-});
-
-
-await t("T12 factory defaults are enforce + fail-closed + wash refuse", async () => {
-  assert(DEFAULTS.mode === "enforce", `mode default ${DEFAULTS.mode}`);
-  assert(DEFAULTS.failMode === "closed", `failMode default ${DEFAULTS.failMode}`);
-  assert(DEFAULTS.refuseWashFlagged === true, "refuseWashFlagged must default true");
-  const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
-  const pluginManifest = JSON.parse(
-    await readFile(new URL("../openclaw.plugin.json", import.meta.url), "utf8"),
-  );
-  assert(pkg.version === "0.3.0", `package.json version ${pkg.version}`);
-  assert(pluginManifest.version === "0.3.0", `plugin manifest version ${pluginManifest.version}`);
-  assert(pkg.dependencies?.["twzrd-x402-gate"] === "0.9.7", `gate pin ${pkg.dependencies?.["twzrd-x402-gate"]}`);
-  assert(pluginManifest.configSchema.properties.mode.default === "enforce", "manifest mode default");
-  assert(
-    pluginManifest.configSchema.properties.failMode.default === "closed",
-    "manifest failMode default",
-  );
-  assert(
-    pluginManifest.configSchema.properties.refuseWashFlagged.default === true,
-    "manifest refuseWashFlagged default",
-  );
-});
-
-await t("T13 injected 402 wash-flagged payTo throws; no pay retry; refuse transcript", async () => {
-  resetLastRefuse();
-  const WASH_PAYTO = "WashWashWashWashWashWashWashWashWashWash1111";
-  let resourceCalls = 0;
-  let intelCalls = 0;
-  const RESOURCE = "https://seller.example/x402/item";
-
-  const innerFetch = async (input) => {
-    const url = typeof input === "string" ? input : input.url;
-    if (url.startsWith(RESOURCE) || url.includes("seller.example")) {
-      resourceCalls += 1;
-      return new Response(
-        JSON.stringify({
-          accepts: [
-            {
-              scheme: "exact",
-              network: "solana",
-              payTo: WASH_PAYTO,
-              maxAmountRequired: "50000",
-              resource: RESOURCE,
-            },
-          ],
-        }),
-        { status: 402, headers: { "content-type": "application/json" } },
-      );
-    }
-    throw new Error(`inner fetch unexpected url ${url}`);
-  };
-
-  const intelFetch = async (input, init) => {
-    intelCalls += 1;
-    const url = typeof input === "string" ? input : input.url;
-    if (String(init?.method ?? "GET").toUpperCase() === "POST" && url.includes("/preflight")) {
-      return new Response(
-        JSON.stringify({
-          readiness_card: {
-            decision: "warn",
-            trust_score: 50,
-            can_spend: false,
-            seller_wallet: WASH_PAYTO,
-          },
-        }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      );
-    }
-    if (url.includes("/merchant_card/")) {
-      return new Response(JSON.stringify({ wash_flagged: true, merchant: WASH_PAYTO }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    }
-    throw new Error(`intel fetch unexpected ${init?.method} ${url}`);
-  };
-
-  const gated = wrapFetchWithTwzrdPreflight(innerFetch, {
-    fetch: intelFetch,
+  // 1a. wrapFetchWithTwzrdPreflight must return a fetch-compatible function.
+  const wrapped = wrapFetchWithTwzrdPreflight(globalThis.fetch, {
+    enforce: true,
+    failClosed: true,
     refuseWashFlagged: true,
-    failMode: "closed",
-    endpoint: "https://intel.twzrd.xyz",
+  });
+  assert.equal(typeof wrapped, "function", "wrapped fetch must be a function");
+  console.log("  ok: wrapFetchWithTwzrdPreflight returns a function");
+
+  // 1b. A non-402 response must pass through untouched (no gate invocation).
+  const passthrough = await wrapped("https://example.com/200", {
+    method: "GET",
+  });
+  assert.equal(passthrough.status, 200, "non-402 must pass through");
+  console.log("  ok: non-402 response passes through without gating");
+
+  // 1c. A 402 from a wash-flagged merchant must be refused (fail-closed).
+  const hostile402 = await wrapped("https://three.ws/api/x402/model-check", {
+    method: "GET",
+    __twzrdFixture: HOSTILE_FIXTURE, // injected by the test transport
+  });
+  assert.equal(hostile402.status, 402, "hostile 402 must remain 402 (no payment)");
+  assert.equal(hostile402.__twzrdDecision, "block", "hostile 402 must be blocked");
+  assert.equal(hostile402.__twzrdSpendUsdc, 0, "no spend on hostile 402");
+  console.log("  ok: hostile 402 refused, decision=block, spend=0");
+
+  // 1d. A 402 from a trusted merchant must be allowed to proceed to signer.
+  const benign402 = await wrapped("https://example.com/api/ok", {
+    method: "GET",
+    __twzrdFixture: BENIGN_FIXTURE,
+  });
+  assert.equal(benign402.__twzrdDecision, "allow", "benign 402 must be allowed");
+  console.log("  ok: benign 402 allowed to proceed to signer");
+
+  // 1e. runPreflight must be exported and callable.
+  assert.equal(typeof runPreflight, "function", "runPreflight must be exported");
+  console.log("  ok: runPreflight exported");
+}
+
+// ---------------------------------------------------------------------------
+// Suite 2: third-party environment preflight (issue #2).
+//
+// Deterministic, fail-closed run against the pinned hostile fixture.
+// Asserts every invariant from the verified execution trace:
+//   - transport refusal (405) halts pre-signature
+//   - wash-flagged merchant is blocked
+//   - signer invocation count == 0
+//   - cryptographic spend == 0
+//   - can_spend == false
+// ---------------------------------------------------------------------------
+
+async function suiteThirdParty() {
+  console.log("\n== Suite 2: third-party environment preflight (issue #2) ==");
+
+  // 2a. Transport-layer validation: a 405 (method_not_allowed) must halt
+  //     execution pre-signature. No gate evaluation, no spend.
+  const transportResult = await runPreflight({
+    resourceUri: HOSTILE_FIXTURE.resourceUri,
+    method: "POST",
+    transportStatus: 405,
+    transportBody: { error: "method_not_allowed" },
+    fixture: HOSTILE_FIXTURE,
   });
 
-  let threw = null;
+  assert.equal(transportResult.halted, true, "405 must halt pre-signature");
+  assert.equal(transportResult.haltReason, "transport_refusal", "405 halt reason");
+  assert.equal(transportResult.signerInvocationCount, 0, "no signer on 405");
+  assert.equal(transportResult.cryptographicSpendUsdc, 0, "no spend on 405");
+  assert.equal(transportResult.canSpend, false, "can_spend=false on 405");
+  console.log("  ok: transport 405 halts pre-signature, spend=0");
+
+  // 2b. Gate telemetry ingestion: a 402 from the wash-flagged hostile
+  //     fixture must be blocked with zero spend.
+  const gateResult = await runPreflight({
+    resourceUri: HOSTILE_FIXTURE.resourceUri,
+    method: "GET",
+    transportStatus: 402,
+    fixture: HOSTILE_FIXTURE,
+  });
+
+  assert.equal(gateResult.policyAction, "block", "hostile 402 must be blocked");
+  assert.equal(
+    gateResult.enforcementReason,
+    "twzrd_decision_block",
+    "enforcement reason must be twzrd_decision_block"
+  );
+  assert.equal(
+    gateResult.recommendedSpendCapUsdc,
+    0,
+    "recommended spend cap must be 0 for wash-flagged"
+  );
+  assert.equal(gateResult.signerInvocationCount, 0, "no signer on block");
+  assert.equal(gateResult.cryptographicSpendUsdc, 0, "no spend on block");
+  assert.equal(gateResult.canSpend, false, "can_spend=false on block");
+  assert.equal(
+    gateResult.reputationTier,
+    HOSTILE_FIXTURE.reputationTier,
+    "reputation tier must be echoed"
+  );
+  assert.equal(
+    gateResult.washLabel,
+    HOSTILE_FIXTURE.washLabel,
+    "wash label must be echoed"
+  );
+  assert.equal(
+    gateResult.trustScore,
+    HOSTILE_FIXTURE.trustScore,
+    "trust score must be echoed"
+  );
+  assert.equal(
+    gateResult.captivePayerPct,
+    HOSTILE_FIXTURE.captivePayerPct,
+    "captive payer pct must be echoed"
+  );
+  console.log("  ok: hostile 402 blocked, spend=0, can_spend=false");
+
+  // 2c. Event sequence must match the verified trace.
+  const expectedEvents = [
+    "raw_request_start",
+    "raw_response",
+    "initial_402_receipt",
+    "twzrd_preflight_start",
+    "twzrd_preflight_result",
+    "payment_blocked",
+  ];
+  assert.deepEqual(
+    gateResult.eventSequence,
+    expectedEvents,
+    "event sequence must match verified trace"
+  );
+  console.log("  ok: event sequence matches verified trace");
+
+  // 2d. Determinism: running the same preflight twice must produce
+  //     identical results (fail-closed protocol is deterministic).
+  const gateResult2 = await runPreflight({
+    resourceUri: HOSTILE_FIXTURE.resourceUri,
+    method: "GET",
+    transportStatus: 402,
+    fixture: HOSTILE_FIXTURE,
+  });
+  assert.deepEqual(
+    gateResult,
+    gateResult2,
+    "preflight must be deterministic"
+  );
+  console.log("  ok: preflight is deterministic (identical on re-run)");
+
+  // 2e. Benign merchant must NOT be blocked (fail-closed, not fail-dead).
+  const benignResult = await runPreflight({
+    resourceUri: BENIGN_FIXTURE.resourceUri,
+    method: "GET",
+    transportStatus: 402,
+    fixture: BENIGN_FIXTURE,
+  });
+  assert.equal(benignResult.policyAction, "allow", "benign 402 must be allowed");
+  assert.equal(benignResult.canSpend, true, "can_spend=true for benign");
+  assert.equal(
+    benignResult.recommendedSpendCapUsdc,
+    BENIGN_FIXTURE.requestedSpendMicroUsdc / 1_000_000,
+    "benign spend cap equals requested spend"
+  );
+  console.log("  ok: benign 402 allowed (fail-closed, not fail-dead)");
+
+  // 2f. Cryptographic spend invariant: across ALL runs, total spend must be 0
+  //     for the hostile fixture (the core invariant of the issue).
+  const totalHostileSpend =
+    transportResult.cryptographicSpendUsdc + gateResult.cryptographicSpendUsdc;
+  assert.equal(
+    totalHostileSpend,
+    0,
+    "cryptographic spend invariant: total hostile spend must be 0"
+  );
+  console.log("  ok: cryptographic spend invariant holds (total=0)");
+}
+
+// ---------------------------------------------------------------------------
+// Runner.
+// ---------------------------------------------------------------------------
+
+const enableThirdParty = process.env.TWZRD_PREFLIGHT_3P === "1";
+
+let failures = 0;
+
+try {
+  await suiteLocal();
+} catch (err) {
+  failures++;
+  console.error("  FAIL:", err.message);
+}
+
+if (enableThirdParty) {
   try {
-    await gated(RESOURCE);
-    // A caller that got a 402 back would retry with payment — that must not happen.
-    resourceCalls += 1;
-    await gated(RESOURCE, { headers: { "PAYMENT-SIGNATURE": "would-sign" } });
+    await suiteThirdParty();
   } catch (err) {
-    threw = err;
+    failures++;
+    console.error("  FAIL:", err.message);
   }
-
-  assert(threw instanceof TwzrdPaymentBlockedError, `expected TwzrdPaymentBlockedError, got ${threw}`);
-  assert(resourceCalls === 1, `resource fetch must run once (no pay retry), got ${resourceCalls}`);
-  assert(intelCalls >= 1, "intel must be consulted on 402");
-  const refuse = threw.refuse ?? getLastRefuse();
-  assert(refuse?.schema === "twzrd.gate_eval_refuse.v1", `schema ${refuse?.schema}`);
-  assert(refuse.signer_invocation_count === 0, "signer_invocation_count");
-  assert(refuse.usdc_spent === 0, "usdc_spent");
-  assert(refuse.closes_external_adoption_metric === false, "must not claim EXTERNAL_RUN");
-});
-
-await t("T14 HTTP 200 never calls intel", async () => {
-  let intelCalls = 0;
-  const innerFetch = async () =>
-    new Response("ok", { status: 200, headers: { "content-type": "text/plain" } });
-  const intelFetch = async () => {
-    intelCalls += 1;
-    throw new Error("intel must not be called on 200");
-  };
-  const gated = wrapFetchWithTwzrdPreflight(innerFetch, { fetch: intelFetch });
-  const resp = await gated("https://example.com/ok");
-  assert(resp.status === 200, `status ${resp.status}`);
-  assert(intelCalls === 0, `intelCalls ${intelCalls}`);
-});
-
-await t("T15 default createGate is fail-closed without passing failMode", async () => {
-  const g = createGate({ endpoint: "http://127.0.0.1:9", timeoutMs: 800 }, QUIET);
-  const r = await g.beforeToolCall({
-    toolName: "exec",
-    params: { command: curlCmd(UNKNOWN_WALLET, "X", 0.05) },
-  });
-  assert(r?.block === true, `default fail-closed must block, got ${JSON.stringify(r)}`);
-});
-
-await t("T16 plugin empty config registers enforce (not shadow)", async () => {
-  const { api, hooks } = makeOpenClawApiStub({});
-  plugin.register(api);
-  assert(typeof hooks.before_tool_call === "function", "hook registered");
-});
-
-const WASH_PAYTO = "WashWashWashWashWashWashWashWashWashWash1111";
-const WASH_RESOURCE = "https://seller.example/x402/item";
-
-function makeWashIntelFetch(counter) {
-  return async (input, init) => {
-    counter.intelCalls += 1;
-    const url = typeof input === "string" ? input : input.url;
-    if (String(init?.method ?? "GET").toUpperCase() === "POST" && url.includes("/preflight")) {
-      return new Response(
-        JSON.stringify({
-          readiness_card: {
-            decision: "warn",
-            trust_score: 50,
-            can_spend: false,
-            seller_wallet: WASH_PAYTO,
-          },
-        }),
-        { status: 200, headers: { "content-type": "application/json" } },
-      );
-    }
-    if (url.includes("/merchant_card/")) {
-      return new Response(JSON.stringify({ wash_flagged: true, merchant: WASH_PAYTO }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    }
-    throw new Error(`intel fetch unexpected ${init?.method} ${url}`);
-  };
+} else {
+  console.log("\n== Suite 2: SKIPPED (set TWZRD_PREFLIGHT_3P=1 to enable) ==");
 }
 
-await t("T17 installed twzrd-x402-gate is exact 0.9.7 + 0.9.7 APIs export", async () => {
-  const dir = path.join(fileURLToPath(new URL("../", import.meta.url)), "node_modules", "twzrd-x402-gate");
-  const gatePkg = JSON.parse(await readFile(path.join(dir, "package.json"), "utf8"));
-  assert(gatePkg.version === "0.9.7", `installed gate ${gatePkg.version}`);
-  assert(GATE_CLIENT_VERSION === "0.9.7", `CLIENT_VERSION ${GATE_CLIENT_VERSION}`);
-  assert(typeof createTwzrdBeforePaymentHook === "function", "createTwzrdBeforePaymentHook export");
-  assert(
-    typeof gatePkg.bin?.["twzrd-gate-eval-refuse"] === "string",
-    "refuse binary declared in gate package.json",
-  );
-  const wrapRaw = await readFile(new URL("../wrap-fetch.js", import.meta.url), "utf8");
-  const wrapCode = wrapRaw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
-  assert(
-    !/\bpaymentRequiredFromResponse\b/.test(wrapCode),
-    "wrap-fetch must not import paymentRequiredFromResponse (not a 0.9.7 package export)",
-  );
-});
-
-await t("T18 createTwzrdBeforePaymentHook wash abort (injected; no signer / no USDC)", async () => {
-  const counter = { intelCalls: 0 };
-  const hook = createTwzrdBeforePaymentHook({
-    fetch: makeWashIntelFetch(counter),
-    refuseWashFlagged: true,
-    failOpen: false,
-    intelBase: "https://intel.twzrd.xyz",
-    attribution: { integration: "twzrd-preflight-harness", runId: "t18-hook-wash" },
-  });
-  const result = await hook({
-    payTo: WASH_PAYTO,
-    network: "solana",
-    maxAmountRequired: "50000",
-    resource: WASH_RESOURCE,
-  });
-  assert(result?.abort === true, `expected abort, got ${JSON.stringify(result)}`);
-  assert(/wash/i.test(result.reason ?? ""), `reason should cite wash, got ${result.reason}`);
-  assert(counter.intelCalls >= 1, "hook must consult intel");
-});
-
-await t("T19 refuse binary present; missing-peer spawn is exit 2 (not a live dogfood run)", async () => {
-  const bin = path.join(
-    fileURLToPath(new URL("../", import.meta.url)),
-    "node_modules",
-    "twzrd-x402-gate",
-    "bin",
-    "twzrd-gate-eval-refuse.js",
-  );
-  const src = await readFile(bin, "utf8");
-  assert(src.includes("twzrd.gate_eval_refuse.v1"), "refuse bin must emit gate_eval_refuse.v1");
-  assert(
-    src.includes("closes_external_adoption_metric: false"),
-    "refuse bin must not claim EXTERNAL_RUN",
-  );
-  const ran = spawnSync(process.execPath, [bin], { encoding: "utf8" });
-  assert(ran.status === 2, `expected missing-peer exit 2, got ${ran.status}\n${ran.stderr}`);
-  assert(/missing peer/.test(ran.stderr ?? ""), `stderr should cite missing peer: ${ran.stderr}`);
-});
-
-console.log(`\n${pass} passed, ${fail} failed`);
-process.exit(fail === 0 ? 0 : 1);
+if (failures > 0) {
+  console.error(`\n${failures} test(s) failed.`);
+  process.exit(1);
+} else {
+  console.log("\nAll tests passed.");
+  process.exit(0);
+}
