@@ -408,7 +408,7 @@ await t("T12 factory defaults are enforce + fail-closed + wash refuse", async ()
   );
   assert(pkg.version === "0.3.0", `package.json version ${pkg.version}`);
   assert(pluginManifest.version === "0.3.0", `plugin manifest version ${pluginManifest.version}`);
-  assert(pkg.dependencies?.["twzrd-x402-gate"] === "0.9.7", `gate pin ${pkg.dependencies?.["twzrd-x402-gate"]}`);
+  assert(pkg.dependencies?.["twzrd-x402-gate"] === "0.9.13", `gate pin ${pkg.dependencies?.["twzrd-x402-gate"]}`);
   assert(pluginManifest.configSchema.properties.mode.default === "enforce", "manifest mode default");
   assert(
     pluginManifest.configSchema.properties.failMode.default === "closed",
@@ -560,11 +560,11 @@ function makeWashIntelFetch(counter) {
   };
 }
 
-await t("T17 installed twzrd-x402-gate is exact 0.9.7 + 0.9.7 APIs export", async () => {
+await t("T17 installed twzrd-x402-gate is exact 0.9.13 + 0.9.13 APIs export", async () => {
   const dir = path.join(fileURLToPath(new URL("../", import.meta.url)), "node_modules", "twzrd-x402-gate");
   const gatePkg = JSON.parse(await readFile(path.join(dir, "package.json"), "utf8"));
-  assert(gatePkg.version === "0.9.7", `installed gate ${gatePkg.version}`);
-  assert(GATE_CLIENT_VERSION === "0.9.7", `CLIENT_VERSION ${GATE_CLIENT_VERSION}`);
+  assert(gatePkg.version === "0.9.13", `installed gate ${gatePkg.version}`);
+  assert(GATE_CLIENT_VERSION === "0.9.13", `CLIENT_VERSION ${GATE_CLIENT_VERSION}`);
   assert(typeof createTwzrdBeforePaymentHook === "function", "createTwzrdBeforePaymentHook export");
   assert(
     typeof gatePkg.bin?.["twzrd-gate-eval-refuse"] === "string",
@@ -574,7 +574,7 @@ await t("T17 installed twzrd-x402-gate is exact 0.9.7 + 0.9.7 APIs export", asyn
   const wrapCode = wrapRaw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
   assert(
     !/\bpaymentRequiredFromResponse\b/.test(wrapCode),
-    "wrap-fetch must not import paymentRequiredFromResponse (not a 0.9.7 package export)",
+    "wrap-fetch must not import paymentRequiredFromResponse (not a 0.9.13 package export)",
   );
 });
 
@@ -615,6 +615,105 @@ await t("T19 refuse binary present; missing-peer spawn is exit 2 (not a live dog
   const ran = spawnSync(process.execPath, [bin], { encoding: "utf8" });
   assert(ran.status === 2, `expected missing-peer exit 2, got ${ran.status}\n${ran.stderr}`);
   assert(/missing peer/.test(ran.stderr ?? ""), `stderr should cite missing peer: ${ran.stderr}`);
+});
+
+/** 402 whose single accepts[] entry carries `fields`; counts resource + intel calls. */
+function make402Harness(fields) {
+  const counter = { resource: 0, intel: 0 };
+  const RESOURCE = "https://seller.example/x402/conflict";
+  const innerFetch = async () => {
+    counter.resource += 1;
+    return new Response(
+      JSON.stringify({
+        accepts: [{ scheme: "exact", network: "solana", resource: RESOURCE, ...fields }],
+      }),
+      { status: 402, headers: { "content-type": "application/json" } },
+    );
+  };
+  const intelFetch = async () => {
+    counter.intel += 1;
+    throw new Error("intel must not be consulted for a conflicted offer");
+  };
+  return { counter, RESOURCE, innerFetch, intelFetch };
+}
+
+for (const [label, fields, reason] of [
+  ["amount vs maxAmountRequired", { payTo: UNKNOWN_WALLET, amount: "1000", maxAmountRequired: "5000000" }, "amount_field_conflict"],
+  ["payTo vs pay_to", { payTo: UNKNOWN_WALLET, pay_to: BLOCK_WALLET, amount: "1000" }, "payto_field_conflict"],
+]) {
+  await t(`T20 conflicting 402 offer (${label}) refuses before intel; no pay`, async () => {
+    resetLastRefuse();
+    const h = make402Harness(fields);
+    const gated = wrapFetchWithTwzrdPreflight(h.innerFetch, {
+      fetch: h.intelFetch,
+      failMode: "open", // conflict must refuse even when the caller opted into fail-open
+      endpoint: "https://intel.twzrd.xyz",
+    });
+    let threw = null;
+    try {
+      await gated(h.RESOURCE);
+    } catch (err) {
+      threw = err;
+    }
+    assert(threw instanceof TwzrdPaymentBlockedError, `expected TwzrdPaymentBlockedError, got ${threw}`);
+    assert(threw.message.includes(reason), `message should cite ${reason}: ${threw.message}`);
+    assert(h.counter.intel === 0, `intel calls ${h.counter.intel}`);
+    assert(h.counter.resource === 1, `resource calls ${h.counter.resource}`);
+    const refuse = threw.refuse ?? getLastRefuse();
+    assert(refuse?.reason === reason || JSON.stringify(refuse).includes(reason), `refuse reason ${JSON.stringify(refuse)}`);
+    assert(refuse.signer_invocation_count === 0 && refuse.usdc_spent === 0, "no signer / no USDC");
+  });
+}
+
+/** Preflight answers warn; merchant_card is down (503). */
+function makeCardOutageFetch(counter) {
+  return async (input, init) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (String(init?.method ?? "GET").toUpperCase() === "POST" && url.includes("/preflight")) {
+      counter.preflight += 1;
+      return new Response(
+        JSON.stringify({ readiness_card: { decision: "warn", trust_score: 50, can_spend: true } }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    if (url.includes("/merchant_card/")) {
+      counter.card += 1;
+      return new Response("upstream down", { status: 503 });
+    }
+    throw new Error(`unexpected ${init?.method} ${url}`);
+  };
+}
+
+await t("T21 merchant_card outage + failMode=closed → block (wash check not skipped)", async () => {
+  const counter = { preflight: 0, card: 0 };
+  const g = createGate(
+    { mode: "enforce", failMode: "closed", fetch: makeCardOutageFetch(counter) },
+    QUIET,
+  );
+  const r = await g.beforeToolCall({
+    toolName: "exec",
+    params: { command: curlCmd(UNKNOWN_WALLET, "X", 0.05) },
+  });
+  assert(counter.preflight === 1 && counter.card >= 1, `calls ${JSON.stringify(counter)}`);
+  assert(r?.block === true, `fail-closed must block on card outage, got ${JSON.stringify(r)}`);
+  assert(/merchant_card/.test(r.blockReason), `reason should cite merchant_card: ${r.blockReason}`);
+  assert(r.refuse?.reason === "twzrd_card_unreachable" || JSON.stringify(r.refuse).includes("twzrd_card_unreachable"),
+    `refuse reason ${JSON.stringify(r.refuse)}`);
+  assert(g.stats.apiFailures === 1, `apiFailures ${g.stats.apiFailures}`);
+});
+
+await t("T21b merchant_card outage + failMode=open → allow (wash unknown)", async () => {
+  const counter = { preflight: 0, card: 0 };
+  const g = createGate(
+    { mode: "enforce", failMode: "open", fetch: makeCardOutageFetch(counter) },
+    QUIET,
+  );
+  const r = await g.beforeToolCall({
+    toolName: "exec",
+    params: { command: curlCmd(UNKNOWN_WALLET, "X", 0.05) },
+  });
+  assert(r === undefined, `fail-open must allow, got ${JSON.stringify(r)}`);
+  assert(counter.card >= 1, "card lookup attempted");
 });
 
 console.log(`\n${pass} passed, ${fail} failed`);
