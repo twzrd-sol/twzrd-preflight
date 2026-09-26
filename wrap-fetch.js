@@ -1,12 +1,12 @@
 /**
  * HTTP 402 intercept for twzrd-preflight.
  *
- * Thin wrapper around twzrd-x402-gate@0.9.7 policy (wrap-equivalent): on 402,
+ * Thin wrapper around twzrd-x402-gate@0.9.9 policy (wrap-equivalent): on 402,
  * evaluate payTo via preflight + merchant_card wash refuse. Denied 402s throw
  * before the caller can attach a payment / invoke a signer. Non-402 responses
  * pass through with no intel call.
  *
- * Public 0.9.7 APIs used here: pickRequirements, payToFromRequirements,
+ * Public 0.9.9 APIs used here: pickRequirements, payToFromRequirements,
  * priceUsdcFromAmountMicro, resolveConfig, twzrdApprovePayment.
  * paymentRequiredFromResponse exists in gate dist/payto but is not a package
  * export — do not import it. createTwzrdBeforePaymentHook is the PayAI
