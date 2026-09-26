@@ -408,7 +408,7 @@ await t("T12 factory defaults are enforce + fail-closed + wash refuse", async ()
   );
   assert(pkg.version === "0.3.0", `package.json version ${pkg.version}`);
   assert(pluginManifest.version === "0.3.0", `plugin manifest version ${pluginManifest.version}`);
-  assert(pkg.dependencies?.["twzrd-x402-gate"] === "0.9.12", `gate pin ${pkg.dependencies?.["twzrd-x402-gate"]}`);
+  assert(pkg.dependencies?.["twzrd-x402-gate"] === "0.9.13", `gate pin ${pkg.dependencies?.["twzrd-x402-gate"]}`);
   assert(pluginManifest.configSchema.properties.mode.default === "enforce", "manifest mode default");
   assert(
     pluginManifest.configSchema.properties.failMode.default === "closed",
@@ -560,11 +560,11 @@ function makeWashIntelFetch(counter) {
   };
 }
 
-await t("T17 installed twzrd-x402-gate is exact 0.9.12 + 0.9.12 APIs export", async () => {
+await t("T17 installed twzrd-x402-gate is exact 0.9.13 + 0.9.13 APIs export", async () => {
   const dir = path.join(fileURLToPath(new URL("../", import.meta.url)), "node_modules", "twzrd-x402-gate");
   const gatePkg = JSON.parse(await readFile(path.join(dir, "package.json"), "utf8"));
-  assert(gatePkg.version === "0.9.12", `installed gate ${gatePkg.version}`);
-  assert(GATE_CLIENT_VERSION === "0.9.12", `CLIENT_VERSION ${GATE_CLIENT_VERSION}`);
+  assert(gatePkg.version === "0.9.13", `installed gate ${gatePkg.version}`);
+  assert(GATE_CLIENT_VERSION === "0.9.13", `CLIENT_VERSION ${GATE_CLIENT_VERSION}`);
   assert(typeof createTwzrdBeforePaymentHook === "function", "createTwzrdBeforePaymentHook export");
   assert(
     typeof gatePkg.bin?.["twzrd-gate-eval-refuse"] === "string",
@@ -574,7 +574,7 @@ await t("T17 installed twzrd-x402-gate is exact 0.9.12 + 0.9.12 APIs export", as
   const wrapCode = wrapRaw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
   assert(
     !/\bpaymentRequiredFromResponse\b/.test(wrapCode),
-    "wrap-fetch must not import paymentRequiredFromResponse (not a 0.9.12 package export)",
+    "wrap-fetch must not import paymentRequiredFromResponse (not a 0.9.13 package export)",
   );
 });
 

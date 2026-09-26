@@ -1,12 +1,12 @@
 /**
  * HTTP 402 intercept for twzrd-preflight.
  *
- * Thin wrapper around twzrd-x402-gate@0.9.12 policy (wrap-equivalent): on 402,
+ * Thin wrapper around twzrd-x402-gate@0.9.13 policy (wrap-equivalent): on 402,
  * evaluate payTo via preflight + merchant_card wash refuse. Denied 402s throw
  * before the caller can attach a payment / invoke a signer. Non-402 responses
  * pass through with no intel call.
  *
- * Public 0.9.12 APIs used here: pickRequirements, payToFromRequirements,
+ * Public 0.9.13 APIs used here: pickRequirements, payToFromRequirements,
  * priceUsdcFromAmountMicro, resolveConfig, twzrdApprovePayment.
  * payToFromRequirements reports `conflict` (amount_field_conflict /
  * payto_field_conflict) and leaves the field undefined; that is refused here,

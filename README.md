@@ -1,6 +1,6 @@
 # twzrd-preflight
 
-OpenClaw plugin **0.3.0**: install = intercept. Pin **`twzrd-x402-gate@0.9.12`**
+OpenClaw plugin **0.3.0**: install = intercept. Pin **`twzrd-x402-gate@0.9.13`**
 (exact; same line as other TWZRD seats).
 
 `wrapFetchWithTwzrdPreflight` runs TWZRD preflight + merchant_card **wash refuse**
@@ -33,7 +33,7 @@ wallet it scored.
 
 ```bash
 npm install twzrd-preflight
-# depends on twzrd-x402-gate@0.9.12 (exact)
+# depends on twzrd-x402-gate@0.9.13 (exact)
 ```
 
 > **Release status:** npm `latest` is **0.2.0** (gate `^0.8.19`, no compat smoke). This README
@@ -148,11 +148,11 @@ or full params are forwarded. The endpoint is configurable.
 ## Test
 
 ```bash
-npm test    # 29 passed (live FREE preflight + injected 402 / 0.9.12 API smoke + conflict and card-outage cases; no auth, no payments)
+npm test    # 29 passed (live FREE preflight + injected 402 / 0.9.13 API smoke + conflict and card-outage cases; no auth, no payments)
 ```
 
 Verified against OpenClaw **2026.7.1-2** (`openclaw.build.openclawVersion` + T10c).
-Gate pin: `twzrd-x402-gate@0.9.12`. Refuse-bin spawn without `@x402/*` peers is a
+Gate pin: `twzrd-x402-gate@0.9.13`. Refuse-bin spawn without `@x402/*` peers is a
 missing-peer fail (exit 2), not a live dogfood EXTERNAL_RUN.
 
 ## CLI
