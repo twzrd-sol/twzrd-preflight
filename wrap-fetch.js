@@ -1,13 +1,16 @@
 /**
  * HTTP 402 intercept for twzrd-preflight.
  *
- * Thin wrapper around twzrd-x402-gate@0.9.9 policy (wrap-equivalent): on 402,
+ * Thin wrapper around twzrd-x402-gate@0.9.12 policy (wrap-equivalent): on 402,
  * evaluate payTo via preflight + merchant_card wash refuse. Denied 402s throw
  * before the caller can attach a payment / invoke a signer. Non-402 responses
  * pass through with no intel call.
  *
- * Public 0.9.9 APIs used here: pickRequirements, payToFromRequirements,
+ * Public 0.9.12 APIs used here: pickRequirements, payToFromRequirements,
  * priceUsdcFromAmountMicro, resolveConfig, twzrdApprovePayment.
+ * payToFromRequirements reports `conflict` (amount_field_conflict /
+ * payto_field_conflict) and leaves the field undefined; that is refused here,
+ * never resolved by precedence.
  * paymentRequiredFromResponse exists in gate dist/payto but is not a package
  * export — do not import it. createTwzrdBeforePaymentHook is the PayAI
  * beforePayment seat, not this wrap.
@@ -117,8 +120,18 @@ export function wrapFetchWithTwzrdPreflight(innerFetch, opts = {}) {
     }
 
     const first = pickRequirements(body.accepts);
-    const { payTo, resource, amountMicro } = payToFromRequirements(first);
+    const { payTo, resource, amountMicro, conflict } = payToFromRequirements(first);
     const url = requestUrl(input);
+    // Two different prices (amount vs maxAmountRequired) or recipients (payTo vs pay_to):
+    // the gate cannot know which one the client will pay, so refuse regardless of failMode.
+    if (conflict) {
+      const refuse = buildRefuse({ payTo: payTo ?? null, url, reason: conflict, verdict: "block" });
+      lastRefuse = refuse;
+      throw new TwzrdPaymentBlockedError(
+        `[twzrd-preflight] payment blocked: ${conflict} url=${url}`,
+        refuse,
+      );
+    }
     const priceUsdc = priceUsdcFromAmountMicro(amountMicro);
 
     const approval = await twzrdApprovePayment(

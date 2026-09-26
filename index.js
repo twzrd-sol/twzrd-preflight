@@ -294,10 +294,34 @@ export function createGate(rawCfg = {}, logger = console) {
 
     let washFlagged = null;
     if (cfg.refuseWashFlagged && intent.sellerWallet) {
-      const mcard = await fetchMerchantCard(intent.sellerWallet, {
-        intelBase: cfg.endpoint,
-        fetch: cfg.fetch,
-      });
+      let mcard = null;
+      try {
+        mcard = await fetchMerchantCard(intent.sellerWallet, {
+          intelBase: cfg.endpoint,
+          fetch: cfg.fetch,
+        });
+      } catch (err) {
+        // twzrd-x402-gate >= 0.9.12 throws MerchantCardUnreachableError on outage instead of
+        // returning null, so "intel down" can no longer pass as "no wash signal".
+        stats.apiFailures += 1;
+        log.warn(`merchant_card unavailable (${err?.message ?? err})`);
+        if (cfg.failMode === "closed") {
+          if (verdict("merchant_card unreachable (failMode=closed)", intent, event.toolName)) {
+            return {
+              block: true,
+              blockReason:
+                "TWZRD trust gate: merchant_card (wash check) unreachable and failMode=closed — payment not evaluated.",
+              refuse: buildRefuse({
+                payTo: intent.sellerWallet,
+                reason: "twzrd_card_unreachable",
+                verdict: "block",
+              }),
+            };
+          }
+          return;
+        }
+        // failMode=open (opt-in): wash status unknown, continue on the preflight decision.
+      }
       if (mcard && typeof mcard.wash_flagged === "boolean") {
         washFlagged = mcard.wash_flagged;
       }
