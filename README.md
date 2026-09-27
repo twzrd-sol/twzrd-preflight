@@ -36,11 +36,6 @@ npm install twzrd-preflight
 # depends on twzrd-x402-gate@0.9.13 (exact)
 ```
 
-> **Release status:** npm `latest` is **0.2.0** (gate `^0.8.19`, no compat smoke). This README
-> describes **0.3.0 on `main`**, which is not published yet. Until it is, `npm install twzrd-preflight`
-> gets 0.2.0; to run 0.3.0, install from this repo
-> (`npm install github:twzrd-sol/twzrd-preflight`). Check with `npm view twzrd-preflight version`.
-
 Register in your OpenClaw config:
 
 ```json
