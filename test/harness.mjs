@@ -406,9 +406,9 @@ await t("T12 factory defaults are enforce + fail-closed + wash refuse", async ()
   const pluginManifest = JSON.parse(
     await readFile(new URL("../openclaw.plugin.json", import.meta.url), "utf8"),
   );
-  assert(pkg.version === "0.3.0", `package.json version ${pkg.version}`);
-  assert(pluginManifest.version === "0.3.0", `plugin manifest version ${pluginManifest.version}`);
-  assert(pkg.dependencies?.["twzrd-x402-gate"] === "0.9.13", `gate pin ${pkg.dependencies?.["twzrd-x402-gate"]}`);
+  assert(pkg.version === "0.4.0", `package.json version ${pkg.version}`);
+  assert(pluginManifest.version === "0.4.0", `plugin manifest version ${pluginManifest.version}`);
+  assert(pkg.dependencies?.["twzrd-x402-gate"] === "0.11.2", `gate pin ${pkg.dependencies?.["twzrd-x402-gate"]}`);
   assert(pluginManifest.configSchema.properties.mode.default === "enforce", "manifest mode default");
   assert(
     pluginManifest.configSchema.properties.failMode.default === "closed",
@@ -560,11 +560,11 @@ function makeWashIntelFetch(counter) {
   };
 }
 
-await t("T17 installed twzrd-x402-gate is exact 0.9.13 + 0.9.13 APIs export", async () => {
+await t("T17 installed twzrd-x402-gate is exact 0.11.2 + 0.11.2 APIs export", async () => {
   const dir = path.join(fileURLToPath(new URL("../", import.meta.url)), "node_modules", "twzrd-x402-gate");
   const gatePkg = JSON.parse(await readFile(path.join(dir, "package.json"), "utf8"));
-  assert(gatePkg.version === "0.9.13", `installed gate ${gatePkg.version}`);
-  assert(GATE_CLIENT_VERSION === "0.9.13", `CLIENT_VERSION ${GATE_CLIENT_VERSION}`);
+  assert(gatePkg.version === "0.11.2", `installed gate ${gatePkg.version}`);
+  assert(GATE_CLIENT_VERSION === "0.11.2", `CLIENT_VERSION ${GATE_CLIENT_VERSION}`);
   assert(typeof createTwzrdBeforePaymentHook === "function", "createTwzrdBeforePaymentHook export");
   assert(
     typeof gatePkg.bin?.["twzrd-gate-eval-refuse"] === "string",
@@ -574,7 +574,7 @@ await t("T17 installed twzrd-x402-gate is exact 0.9.13 + 0.9.13 APIs export", as
   const wrapCode = wrapRaw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
   assert(
     !/\bpaymentRequiredFromResponse\b/.test(wrapCode),
-    "wrap-fetch must not import paymentRequiredFromResponse (not a 0.9.13 package export)",
+    "wrap-fetch must not import paymentRequiredFromResponse (not a 0.11.2 package export)",
   );
 });
 
@@ -714,6 +714,142 @@ await t("T21b merchant_card outage + failMode=open → allow (wash unknown)", as
   });
   assert(r === undefined, `fail-open must allow, got ${JSON.stringify(r)}`);
   assert(counter.card >= 1, "card lookup attempted");
+});
+
+// ---- x402 v2 header, every offer, asset (gate 0.11.x parity) ----
+const USDC_SOL = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+const CLEAN_PAYTO = "CLeanCLeanCLeanCLeanCLeanCLeanCLeanCLean1111";
+const DIRTY_PAYTO = "DirtyDirtyDirtyDirtyDirtyDirtyDirtyDirty1111";
+
+/** Intel mock: every seller is an evaluated allow; DIRTY_PAYTO is wash-flagged. */
+function makeOfferIntel(counter) {
+  return async (input, init) => {
+    const url = typeof input === "string" ? input : input.url;
+    counter.intel += 1;
+    if (String(init?.method ?? "GET").toUpperCase() === "POST" && url.includes("/preflight")) {
+      const body = JSON.parse(init?.body ?? "{}");
+      const seller = body.seller_wallet ?? body.payTo ?? body.pay_to;
+      counter.preflightSellers.push(seller);
+      return new Response(
+        JSON.stringify({
+          readiness_card: {
+            decision: "allow",
+            trust_score: 85,
+            score: 85,
+            can_spend: true,
+            recommended_cap_usdc: 1,
+            seller_wallet: seller,
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      );
+    }
+    if (url.includes("/merchant_card/")) {
+      const wash = url.includes(DIRTY_PAYTO);
+      return new Response(JSON.stringify({ wash_flagged: wash }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    throw new Error(`unexpected ${init?.method} ${url}`);
+  };
+}
+
+const offer = (payTo, extra = {}) => ({
+  scheme: "exact",
+  network: "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+  payTo,
+  amount: "10000",
+  asset: USDC_SOL,
+  resource: "https://seller.example/x402/v2",
+  ...extra,
+});
+
+/** 402 carrying `accepts` in the v2 PAYMENT-REQUIRED header (base64 JSON), body `{}`. */
+function header402(accepts, headerOverride) {
+  const header =
+    headerOverride ?? Buffer.from(JSON.stringify({ x402Version: 2, accepts })).toString("base64");
+  return async () =>
+    new Response("{}", {
+      status: 402,
+      headers: { "content-type": "application/json", "PAYMENT-REQUIRED": header },
+    });
+}
+
+async function runGated(innerFetch, counter, opts = {}) {
+  resetLastRefuse();
+  const gated = wrapFetchWithTwzrdPreflight(innerFetch, {
+    fetch: makeOfferIntel(counter),
+    endpoint: "https://intel.twzrd.xyz",
+    ...opts,
+  });
+  try {
+    return { resp: await gated("https://seller.example/x402/v2"), err: null };
+  } catch (err) {
+    return { resp: null, err };
+  }
+}
+
+await t("T22 v2 header-only 402 is read from PAYMENT-REQUIRED (clean seller passes)", async () => {
+  const counter = { intel: 0, preflightSellers: [] };
+  const { resp, err } = await runGated(header402([offer(CLEAN_PAYTO)]), counter);
+  assert(err === null, `clean v2 offer must pass, got ${err?.message}`);
+  assert(resp?.status === 402, `402 returned to the payer, got ${resp?.status}`);
+  assert(counter.preflightSellers.includes(CLEAN_PAYTO), `intel saw ${JSON.stringify(counter.preflightSellers)}`);
+});
+
+await t("T23 every offer is checked: clean first + wash-flagged second → block", async () => {
+  const counter = { intel: 0, preflightSellers: [] };
+  const { err } = await runGated(header402([offer(CLEAN_PAYTO), offer(DIRTY_PAYTO)]), counter);
+  assert(err instanceof TwzrdPaymentBlockedError, `expected block, got ${err}`);
+  assert(err.message.includes(DIRTY_PAYTO), `refusal must name the dirty payTo: ${err.message}`);
+  assert((err.refuse ?? getLastRefuse())?.pay_to === DIRTY_PAYTO, "refuse transcript pay_to");
+});
+
+await t("T23b every offer is checked in a body-only (v1) 402 too", async () => {
+  const counter = { intel: 0, preflightSellers: [] };
+  const inner = async () =>
+    new Response(JSON.stringify({ accepts: [offer(CLEAN_PAYTO), offer(DIRTY_PAYTO)] }), {
+      status: 402,
+      headers: { "content-type": "application/json" },
+    });
+  const { err } = await runGated(inner, counter);
+  assert(err instanceof TwzrdPaymentBlockedError, `expected block (dirty second offer), got ${err}`);
+  assert(err.message.includes(DIRTY_PAYTO), `refusal must name the dirty payTo: ${err.message}`);
+});
+
+await t("T24 non-USDC asset on Solana → twzrd_non_usdc_asset before intel", async () => {
+  const counter = { intel: 0, preflightSellers: [] };
+  const other = offer(CLEAN_PAYTO, { asset: "So11111111111111111111111111111111111111112" });
+  const { err } = await runGated(header402([other]), counter, { failMode: "open" });
+  assert(err instanceof TwzrdPaymentBlockedError, `expected block, got ${err}`);
+  assert(err.message.includes("twzrd_non_usdc_asset"), `reason: ${err.message}`);
+  assert(counter.intel === 0, `intel must not be called, got ${counter.intel}`);
+});
+
+await t("T25 more than 8 distinct offers → too_many_payment_options", async () => {
+  const counter = { intel: 0, preflightSellers: [] };
+  const many = Array.from({ length: 9 }, (_, i) => offer(CLEAN_PAYTO, { amount: String(1000 + i) }));
+  const { err } = await runGated(header402(many), counter);
+  assert(err instanceof TwzrdPaymentBlockedError, `expected block, got ${err}`);
+  assert(err.message.includes("too_many_payment_options"), `reason: ${err.message}`);
+  assert(counter.intel === 0, `intel must not be called, got ${counter.intel}`);
+});
+
+await t("T26 undecodable PAYMENT-REQUIRED header → block, no intel", async () => {
+  const counter = { intel: 0, preflightSellers: [] };
+  const { err } = await runGated(header402([], "%%%not-base64-json%%%"), counter, { failMode: "open" });
+  assert(err instanceof TwzrdPaymentBlockedError, `expected block, got ${err}`);
+  assert(/PAYMENT-REQUIRED/.test(err.message), `reason should cite the header: ${err.message}`);
+  assert(counter.intel === 0, `intel must not be called, got ${counter.intel}`);
+});
+
+await t("T27 malformed amount (decimal) → amount_malformed before intel", async () => {
+  const counter = { intel: 0, preflightSellers: [] };
+  const { err } = await runGated(header402([offer(CLEAN_PAYTO, { amount: "0.01" })]), counter, { failMode: "open" });
+  assert(err instanceof TwzrdPaymentBlockedError, `expected block, got ${err}`);
+  assert(err.message.includes("amount_malformed"), `reason: ${err.message}`);
+  assert(counter.intel === 0, `intel must not be called, got ${counter.intel}`);
 });
 
 console.log(`\n${pass} passed, ${fail} failed`);

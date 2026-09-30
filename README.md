@@ -1,11 +1,25 @@
 # twzrd-preflight
 
-OpenClaw plugin **0.3.0**: install = intercept. Pin **`twzrd-x402-gate@0.9.13`**
+OpenClaw plugin **0.4.0**: install = intercept. Pin **`twzrd-x402-gate@0.11.2`**
 (exact; same line as other TWZRD seats).
 
 `wrapFetchWithTwzrdPreflight` runs TWZRD preflight + merchant_card **wash refuse**
 on every HTTP **402** before a signer can attach payment. Defaults: **enforce**,
 **fail-closed**, **refuseWashFlagged on**. Shadow / fail-open / wash-off are opt-in.
+
+Since 0.4.0 it reads a 402 the way the payer does and checks every offer the payer
+could pick, matching `twzrd-x402-gate@0.11.2`'s own wrapper:
+
+- x402 v2 requirements are read from the `PAYMENT-REQUIRED` header (base64 JSON)
+  before the body. An undecodable header is refused. 0.3.0 refused every
+  header-only v2 402 as `twzrd_unidentifiable_payment_recipient`.
+- **Every** distinct `accepts[]` entry must pass, not just the first. More than 8
+  distinct entries are refused (`too_many_payment_options`).
+- An offer naming a non-USDC asset on Solana or Base is refused before intel
+  (`twzrd_non_usdc_asset`). So is an amount that is not an ASCII base-unit integer
+  (`amount_malformed`) and an offer with two different prices or recipients.
+- A seller intel has never evaluated is allowed up to the card's cap (currently
+  $0.10), per the gate's 0.11.0 policy.
 
 Also gates payment-shaped OpenClaw tool calls (`before_tool_call`).
 
@@ -33,7 +47,7 @@ wallet it scored.
 
 ```bash
 npm install twzrd-preflight
-# depends on twzrd-x402-gate@0.9.13 (exact)
+# depends on twzrd-x402-gate@0.11.2 (exact)
 ```
 
 Register in your OpenClaw config:
@@ -143,11 +157,11 @@ or full params are forwarded. The endpoint is configurable.
 ## Test
 
 ```bash
-npm test    # 29 passed (live FREE preflight + injected 402 / 0.9.13 API smoke + conflict and card-outage cases; no auth, no payments)
+npm test    # 36 passed (live FREE preflight + injected 402 / 0.11.2 API smoke + conflict, card-outage, v2 header, every-offer, asset cases; no auth, no payments)
 ```
 
 Verified against OpenClaw **2026.7.1-2** (`openclaw.build.openclawVersion` + T10c).
-Gate pin: `twzrd-x402-gate@0.9.13`. Refuse-bin spawn without `@x402/*` peers is a
+Gate pin: `twzrd-x402-gate@0.11.2`. Refuse-bin spawn without `@x402/*` peers is a
 missing-peer fail (exit 2), not a live dogfood EXTERNAL_RUN.
 
 ## CLI
