@@ -376,20 +376,27 @@ await t("T10e openclaw's own manifest reader accepts our package.json (skips if 
     console.log("  SKIP T10e (openclaw not installed — run `npm i -D openclaw` to enable)");
     return;
   }
-  const manifestFile = files.find((f) => /^manifest-.*\.js$/.test(f));
-  assert(manifestFile, "openclaw dist: manifest module not found (vendor layout changed?)");
-  const mod = await import(path.join(dir, "dist", manifestFile));
+  // The reader lives in a hash-named chunk: manifest-<hash>.js up to 2026.7.x,
+  // package-manifest-<hash>.mjs from 2026.9.x. Match only hash-named chunks, never
+  // manifest-command-aliases.runtime.js and friends (the old /^manifest-.*\.js$/ picked
+  // one of those on 2026.9.7 and found no status function).
+  const manifestFiles = files.filter((f) => /^(package-)?manifest-[A-Za-z0-9_-]{8}\.m?js$/.test(f));
+  assert(manifestFiles.length > 0, "openclaw dist: manifest module not found (vendor layout changed?)");
   const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
-  const statuses = Object.values(mod)
-    .filter((f) => typeof f === "function")
-    .map((f) => {
+  const statuses = [];
+  for (const file of manifestFiles) {
+    const mod = await import(path.join(dir, "dist", file));
+    for (const f of Object.values(mod)) {
+      if (typeof f !== "function") continue;
+      let r;
       try {
-        return f(pkg, dir);
+        r = f(pkg, dir);
       } catch {
-        return undefined;
+        r = undefined;
       }
-    })
-    .filter((r) => r && typeof r === "object" && "status" in r);
+      if (r && typeof r === "object" && "status" in r) statuses.push(r);
+    }
+  }
   assert(statuses.length > 0, "no manifest status function found in openclaw dist");
   assert(
     statuses.some((r) => r.status === "ok"),
