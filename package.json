@@ -50,6 +50,6 @@
     "node": ">=18"
   },
   "devDependencies": {
-    "openclaw": "^2026.7.1-2"
+    "openclaw": "^2026.9.7"
   }
 }
