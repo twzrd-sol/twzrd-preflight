@@ -1,14 +1,14 @@
 /**
  * HTTP 402 intercept for twzrd-preflight.
  *
- * Thin wrapper around twzrd-x402-gate@0.11.2 policy (the same steps as the gate's
+ * Thin wrapper around twzrd-x402-gate@0.11.4 policy (the same steps as the gate's
  * own wrapFetchWithTwzrdGate): on 402, read the requirements (v2 PAYMENT-REQUIRED
  * header first, then the body) and approve EVERY distinct accepts[] entry via
  * preflight + merchant_card wash refuse. Denied 402s throw before the caller can
  * attach a payment / invoke a signer. Non-402 responses pass through with no intel
  * call.
  *
- * Public 0.11.2 APIs used here: priceUsdcFromAmountMicro, requirementAsset,
+ * Public 0.11.4 APIs used here: priceUsdcFromAmountMicro, requirementAsset,
  * resolveConfig, resolveRequirementFields, twzrdApprovePayment.
  * resolveRequirementFields reports `conflict` (amount_field_conflict,
  * amount_malformed, payto_field_conflict) and leaves the field undefined; that is
@@ -24,7 +24,7 @@ import {
   twzrdApprovePayment,
 } from "twzrd-x402-gate";
 
-/** Same limits and reason code as the gate's own wrappers (twzrd-x402-gate 0.11.2). */
+/** Same limits and reason code as the gate's own wrappers (twzrd-x402-gate 0.11.4). */
 export const MAX_DISTINCT_OFFERS = 8;
 export const TOO_MANY_PAYMENT_OPTIONS = "too_many_payment_options";
 

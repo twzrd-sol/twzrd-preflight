@@ -12,7 +12,7 @@ The runtime plugin is installed from npm:
 
 ```bash
 npm install twzrd-preflight
-# twzrd-x402-gate@0.11.2
+# twzrd-x402-gate@0.11.4
 ```
 
 OpenClaw config example:
