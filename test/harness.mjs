@@ -413,9 +413,9 @@ await t("T12 factory defaults are enforce + fail-closed + wash refuse", async ()
   const pluginManifest = JSON.parse(
     await readFile(new URL("../openclaw.plugin.json", import.meta.url), "utf8"),
   );
-  assert(pkg.version === "0.4.0", `package.json version ${pkg.version}`);
-  assert(pluginManifest.version === "0.4.0", `plugin manifest version ${pluginManifest.version}`);
-  assert(pkg.dependencies?.["twzrd-x402-gate"] === "0.11.2", `gate pin ${pkg.dependencies?.["twzrd-x402-gate"]}`);
+  assert(pkg.version === "0.4.1", `package.json version ${pkg.version}`);
+  assert(pluginManifest.version === "0.4.1", `plugin manifest version ${pluginManifest.version}`);
+  assert(pkg.dependencies?.["twzrd-x402-gate"] === "0.11.4", `gate pin ${pkg.dependencies?.["twzrd-x402-gate"]}`);
   assert(pluginManifest.configSchema.properties.mode.default === "enforce", "manifest mode default");
   assert(
     pluginManifest.configSchema.properties.failMode.default === "closed",
@@ -567,11 +567,11 @@ function makeWashIntelFetch(counter) {
   };
 }
 
-await t("T17 installed twzrd-x402-gate is exact 0.11.2 + 0.11.2 APIs export", async () => {
+await t("T17 installed twzrd-x402-gate is exact 0.11.4 + 0.11.4 APIs export", async () => {
   const dir = path.join(fileURLToPath(new URL("../", import.meta.url)), "node_modules", "twzrd-x402-gate");
   const gatePkg = JSON.parse(await readFile(path.join(dir, "package.json"), "utf8"));
-  assert(gatePkg.version === "0.11.2", `installed gate ${gatePkg.version}`);
-  assert(GATE_CLIENT_VERSION === "0.11.2", `CLIENT_VERSION ${GATE_CLIENT_VERSION}`);
+  assert(gatePkg.version === "0.11.4", `installed gate ${gatePkg.version}`);
+  assert(GATE_CLIENT_VERSION === "0.11.4", `CLIENT_VERSION ${GATE_CLIENT_VERSION}`);
   assert(typeof createTwzrdBeforePaymentHook === "function", "createTwzrdBeforePaymentHook export");
   assert(
     typeof gatePkg.bin?.["twzrd-gate-eval-refuse"] === "string",
@@ -581,7 +581,7 @@ await t("T17 installed twzrd-x402-gate is exact 0.11.2 + 0.11.2 APIs export", as
   const wrapCode = wrapRaw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
   assert(
     !/\bpaymentRequiredFromResponse\b/.test(wrapCode),
-    "wrap-fetch must not import paymentRequiredFromResponse (not a 0.11.2 package export)",
+    "wrap-fetch must not import paymentRequiredFromResponse (not a 0.11.4 package export)",
   );
 });
 
@@ -857,6 +857,23 @@ await t("T27 malformed amount (decimal) → amount_malformed before intel", asyn
   assert(err instanceof TwzrdPaymentBlockedError, `expected block, got ${err}`);
   assert(err.message.includes("amount_malformed"), `reason: ${err.message}`);
   assert(counter.intel === 0, `intel must not be called, got ${counter.intel}`);
+});
+
+await t("T28 bare \"USDC\" symbol is not a mint → twzrd_non_usdc_asset before intel", async () => {
+  const counter = { intel: 0, preflightSellers: [] };
+  const { err } = await runGated(header402([offer(CLEAN_PAYTO, { asset: "USDC" })]), counter, { failMode: "open" });
+  assert(err instanceof TwzrdPaymentBlockedError, `expected block, got ${err}`);
+  assert(err.message.includes("twzrd_non_usdc_asset"), `reason: ${err.message}`);
+  assert(counter.intel === 0, `intel must not be called, got ${counter.intel}`);
+});
+
+await t("T29 clean offer + sibling with no recipient → refused whole", async () => {
+  const counter = { intel: 0, preflightSellers: [] };
+  const noRecipient = offer(undefined, { network: "eip155:8453", amount: "20000" });
+  delete noRecipient.payTo;
+  const { err } = await runGated(header402([offer(CLEAN_PAYTO), noRecipient]), counter, { failMode: "open" });
+  assert(err instanceof TwzrdPaymentBlockedError, `expected block, got ${err}`);
+  assert(err.message.includes("twzrd_unidentifiable_payment_recipient"), `reason: ${err.message}`);
 });
 
 console.log(`\n${pass} passed, ${fail} failed`);
