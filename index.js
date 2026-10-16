@@ -1,5 +1,5 @@
 /**
- * twzrd-preflight — OpenClaw plugin (0.4.1)
+ * twzrd-preflight — OpenClaw plugin (0.4.2)
  *
  * Two seams:
  *   1) wrapFetchWithTwzrdPreflight — HTTP 402 intercept (install = intercept).
