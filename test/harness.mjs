@@ -413,9 +413,9 @@ await t("T12 factory defaults are enforce + fail-closed + wash refuse", async ()
   const pluginManifest = JSON.parse(
     await readFile(new URL("../openclaw.plugin.json", import.meta.url), "utf8"),
   );
-  assert(pkg.version === "0.4.1", `package.json version ${pkg.version}`);
-  assert(pluginManifest.version === "0.4.1", `plugin manifest version ${pluginManifest.version}`);
-  assert(pkg.dependencies?.["twzrd-x402-gate"] === "0.11.4", `gate pin ${pkg.dependencies?.["twzrd-x402-gate"]}`);
+  assert(pkg.version === "0.4.2", `package.json version ${pkg.version}`);
+  assert(pluginManifest.version === "0.4.2", `plugin manifest version ${pluginManifest.version}`);
+  assert(pkg.dependencies?.["twzrd-x402-gate"] === "0.12.0", `gate pin ${pkg.dependencies?.["twzrd-x402-gate"]}`);
   assert(pluginManifest.configSchema.properties.mode.default === "enforce", "manifest mode default");
   assert(
     pluginManifest.configSchema.properties.failMode.default === "closed",
@@ -567,11 +567,11 @@ function makeWashIntelFetch(counter) {
   };
 }
 
-await t("T17 installed twzrd-x402-gate is exact 0.11.4 + 0.11.4 APIs export", async () => {
+await t("T17 installed twzrd-x402-gate is exact 0.12.0 + 0.12.0 APIs export", async () => {
   const dir = path.join(fileURLToPath(new URL("../", import.meta.url)), "node_modules", "twzrd-x402-gate");
   const gatePkg = JSON.parse(await readFile(path.join(dir, "package.json"), "utf8"));
-  assert(gatePkg.version === "0.11.4", `installed gate ${gatePkg.version}`);
-  assert(GATE_CLIENT_VERSION === "0.11.4", `CLIENT_VERSION ${GATE_CLIENT_VERSION}`);
+  assert(gatePkg.version === "0.12.0", `installed gate ${gatePkg.version}`);
+  assert(GATE_CLIENT_VERSION === "0.12.0", `CLIENT_VERSION ${GATE_CLIENT_VERSION}`);
   assert(typeof createTwzrdBeforePaymentHook === "function", "createTwzrdBeforePaymentHook export");
   assert(
     typeof gatePkg.bin?.["twzrd-gate-eval-refuse"] === "string",
@@ -581,7 +581,7 @@ await t("T17 installed twzrd-x402-gate is exact 0.11.4 + 0.11.4 APIs export", as
   const wrapCode = wrapRaw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
   assert(
     !/\bpaymentRequiredFromResponse\b/.test(wrapCode),
-    "wrap-fetch must not import paymentRequiredFromResponse (not a 0.11.4 package export)",
+    "wrap-fetch must not import paymentRequiredFromResponse (not a 0.12.0 package export)",
   );
 });
 
@@ -874,6 +874,61 @@ await t("T29 clean offer + sibling with no recipient → refused whole", async (
   const { err } = await runGated(header402([offer(CLEAN_PAYTO), noRecipient]), counter, { failMode: "open" });
   assert(err instanceof TwzrdPaymentBlockedError, `expected block, got ${err}`);
   assert(err.message.includes("twzrd_unidentifiable_payment_recipient"), `reason: ${err.message}`);
+});
+
+// ---- gate 0.12.0: refuseWashUnknown (opt-in, off in 0.12.x) ----
+/** makeOfferIntel, but every merchant_card answers with `card` (wash coverage fields included). */
+function makeCardIntel(counter, card) {
+  const base = makeOfferIntel(counter);
+  return async (input, init) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (url.includes("/merchant_card/")) {
+      counter.intel += 1;
+      return new Response(JSON.stringify(card), { status: 200, headers: { "content-type": "application/json" } });
+    }
+    return base(input, init);
+  };
+}
+const PARTIAL_COVERAGE = { wash_flagged: false, wash_confidence: "partial_inbound_only", ring_evaluated: true, wash_stale: false };
+const FULL_COVERAGE = { wash_flagged: false, wash_confidence: "full", ring_evaluated: true, wash_stale: false };
+
+/** Run `fn` with one environment variable set (or removed), then put it back. */
+async function withEnv(name, value, fn) {
+  const had = Object.hasOwn(process.env, name);
+  const prev = process.env[name];
+  if (value === undefined) delete process.env[name];
+  else process.env[name] = value;
+  try {
+    return await fn();
+  } finally {
+    if (had) process.env[name] = prev;
+    else delete process.env[name];
+  }
+}
+
+await t("T30 refuseWashUnknown stays off by default: clean seller with partial wash coverage passes the 402 wrap", async () => {
+  await withEnv("TWZRD_REFUSE_WASH_UNKNOWN", undefined, async () => {
+    const counter = { intel: 0, preflightSellers: [] };
+    const { resp, err } = await runGated(header402([offer(CLEAN_PAYTO)]), counter, { fetch: makeCardIntel(counter, PARTIAL_COVERAGE) });
+    assert(err === null, `partial coverage must pass with the option off, got ${err?.message}`);
+    assert(resp?.status === 402, `402 returned to the payer, got ${resp?.status}`);
+  });
+});
+
+await t("T31 TWZRD_REFUSE_WASH_UNKNOWN=1 reaches the 402 wrap (partial refused, full passes), not the tool-call hook", async () => {
+  await withEnv("TWZRD_REFUSE_WASH_UNKNOWN", "1", async () => {
+    const counter = { intel: 0, preflightSellers: [] };
+    const partial = await runGated(header402([offer(CLEAN_PAYTO)]), counter, { fetch: makeCardIntel(counter, PARTIAL_COVERAGE) });
+    assert(partial.err instanceof TwzrdPaymentBlockedError, `expected block, got ${partial.err}`);
+    assert(partial.err.message.includes("twzrd_wash_unknown"), `reason: ${partial.err.message}`);
+    const full = await runGated(header402([offer(CLEAN_PAYTO)]), counter, { fetch: makeCardIntel(counter, FULL_COVERAGE) });
+    assert(full.err === null, `full coverage must pass, got ${full.err?.message}`);
+    assert(full.resp?.status === 402, `402 returned to the payer, got ${full.resp?.status}`);
+    // The before_tool_call hook applies wash policy itself and does not read the gate's switch.
+    const g = createGate({ mode: "enforce", fetch: makeCardIntel({ intel: 0, preflightSellers: [] }, PARTIAL_COVERAGE) }, QUIET);
+    const r = await g.beforeToolCall({ toolName: "exec", params: { command: curlCmd(CLEAN_PAYTO, "Clean thing", 0.01) } });
+    assert(r === undefined, `tool hook must still allow partial coverage, got ${JSON.stringify(r)}`);
+  });
 });
 
 console.log(`\n${pass} passed, ${fail} failed`);
