@@ -1,5 +1,13 @@
 # twzrd-preflight
 
+> **Status (2026-10-20): frozen reference implementation.** This plugin is maintained as a
+> worked example of a TWZRD seat (a `before_tool_call` hook plus a 402 fetch wrap over
+> `twzrd-x402-gate`), pinned at gate **0.12.0**. Its gate pin is no longer bumped on each gate
+> release; the live, maintained surface is the gate itself (`twzrd-x402-gate` in
+> `twzrd-sol/twzrd-trust`). Operator decision after a 90-day usage review: every call this
+> plugin has made to intel fell on its own release and test days, with no external host running
+> it. It will be unfrozen when a named OpenClaw or Hermes host adopts it.
+
 OpenClaw plugin **0.4.2**: install = intercept. Pin **`twzrd-x402-gate@0.12.0`**
 (exact; same line as other TWZRD seats).
 
