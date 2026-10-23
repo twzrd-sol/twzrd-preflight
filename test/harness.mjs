@@ -413,9 +413,9 @@ await t("T12 factory defaults are enforce + fail-closed + wash refuse", async ()
   const pluginManifest = JSON.parse(
     await readFile(new URL("../openclaw.plugin.json", import.meta.url), "utf8"),
   );
-  assert(pkg.version === "0.4.2", `package.json version ${pkg.version}`);
-  assert(pluginManifest.version === "0.4.2", `plugin manifest version ${pluginManifest.version}`);
-  assert(pkg.dependencies?.["twzrd-x402-gate"] === "0.12.0", `gate pin ${pkg.dependencies?.["twzrd-x402-gate"]}`);
+  assert(pkg.version === "0.4.3", `package.json version ${pkg.version}`);
+  assert(pluginManifest.version === "0.4.3", `plugin manifest version ${pluginManifest.version}`);
+  assert(pkg.dependencies?.["twzrd-x402-gate"] === "0.12.5", `gate pin ${pkg.dependencies?.["twzrd-x402-gate"]}`);
   assert(pluginManifest.configSchema.properties.mode.default === "enforce", "manifest mode default");
   assert(
     pluginManifest.configSchema.properties.failMode.default === "closed",
@@ -567,11 +567,11 @@ function makeWashIntelFetch(counter) {
   };
 }
 
-await t("T17 installed twzrd-x402-gate is exact 0.12.0 + 0.12.0 APIs export", async () => {
+await t("T17 installed twzrd-x402-gate is exact 0.12.5 + 0.12.5 APIs export", async () => {
   const dir = path.join(fileURLToPath(new URL("../", import.meta.url)), "node_modules", "twzrd-x402-gate");
   const gatePkg = JSON.parse(await readFile(path.join(dir, "package.json"), "utf8"));
-  assert(gatePkg.version === "0.12.0", `installed gate ${gatePkg.version}`);
-  assert(GATE_CLIENT_VERSION === "0.12.0", `CLIENT_VERSION ${GATE_CLIENT_VERSION}`);
+  assert(gatePkg.version === "0.12.5", `installed gate ${gatePkg.version}`);
+  assert(GATE_CLIENT_VERSION === "0.12.5", `CLIENT_VERSION ${GATE_CLIENT_VERSION}`);
   assert(typeof createTwzrdBeforePaymentHook === "function", "createTwzrdBeforePaymentHook export");
   assert(
     typeof gatePkg.bin?.["twzrd-gate-eval-refuse"] === "string",
@@ -581,7 +581,7 @@ await t("T17 installed twzrd-x402-gate is exact 0.12.0 + 0.12.0 APIs export", as
   const wrapCode = wrapRaw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
   assert(
     !/\bpaymentRequiredFromResponse\b/.test(wrapCode),
-    "wrap-fetch must not import paymentRequiredFromResponse (not a 0.12.0 package export)",
+    "wrap-fetch must not import paymentRequiredFromResponse (not a 0.12.5 package export)",
   );
 });
 
@@ -876,7 +876,7 @@ await t("T29 clean offer + sibling with no recipient → refused whole", async (
   assert(err.message.includes("twzrd_unidentifiable_payment_recipient"), `reason: ${err.message}`);
 });
 
-// ---- gate 0.12.0: refuseWashUnknown (opt-in, off in 0.12.x) ----
+// ---- gate 0.12.x: refuseWashUnknown (opt-in, off until 0.13.0) ----
 /** makeOfferIntel, but every merchant_card answers with `card` (wash coverage fields included). */
 function makeCardIntel(counter, card) {
   const base = makeOfferIntel(counter);

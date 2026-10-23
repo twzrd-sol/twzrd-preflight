@@ -1,18 +1,33 @@
 # twzrd-preflight
 
-> **Status (2026-10-20): frozen reference implementation.** This plugin is maintained as a
+> **Status (2026-10-23): frozen reference implementation.** This plugin is maintained as a
 > worked example of a TWZRD seat (a `before_tool_call` hook plus a 402 fetch wrap over
-> `twzrd-x402-gate`), pinned at gate **0.12.0**. Its gate pin is no longer bumped on each gate
+> `twzrd-x402-gate`), pinned at gate **0.12.5**. Its gate pin is no longer bumped on each gate
 > release; the live, maintained surface is the gate itself (`twzrd-x402-gate` in
 > `twzrd-sol/twzrd-trust`). Operator decision after a 90-day usage review: every call this
 > plugin has made to intel fell on its own release and test days, with no external host running
-> it. It will be unfrozen when a named OpenClaw or Hermes host adopts it.
+> it. It will be unfrozen when a named OpenClaw or Hermes host adopts it. 0.4.3 is the one
+> pin move onto the current gate line.
 
-OpenClaw plugin **0.4.2**: install = intercept. Pin **`twzrd-x402-gate@0.12.0`**
+OpenClaw plugin **0.4.3**: install = intercept. Pin **`twzrd-x402-gate@0.12.5`**
 (exact; same line as other TWZRD seats).
 
-0.4.2 moves the gate pin from 0.11.4 to 0.12.0. By default nothing this plugin
+0.4.3 moves the gate pin from 0.12.0 to 0.12.5. By default nothing this plugin
 decides changes:
+
+- 0.12.1 through 0.12.4 add opt-in buyer-fetch and fulfillment options. This plugin
+  does not call `createBuyerFetch` or pass `onFulfillment` / `expectedAmount`.
+- 0.12.5 refuses a Solana devnet or testnet named only by its CAIP-2 genesis id when
+  `unsupportedNetworkMode` is `strict`. The default stays `observe`. This plugin does
+  not set the option. The 402 wrap builds config with `resolveConfig`, so
+  `TWZRD_UNSUPPORTED_NETWORK_MODE=strict` reaches that wrap. It does not reach the
+  `before_tool_call` hook.
+- `refuseWashUnknown` stays opt-in until 0.13.0. This plugin passes no such option.
+  `TWZRD_REFUSE_WASH_UNKNOWN=1` still reaches the 402 wrap through `resolveConfig`,
+  and not the tool hook. Tests T30 and T31 pin both.
+
+0.4.2 moved the gate pin from 0.11.4 to 0.12.0. By default nothing that release
+decided changed:
 
 - 0.12.0 adds an opt-in `refuseWashUnknown`, off in 0.12.x. Opted in, a merchant
   card that answered without full wash coverage (partial or unknown confidence,
@@ -37,7 +52,7 @@ on every HTTP **402** before a signer can attach payment. Defaults: **enforce**,
 **fail-closed**, **refuseWashFlagged on**. Shadow / fail-open / wash-off are opt-in.
 
 Since 0.4.0 it reads a 402 the way the payer does and checks every offer the payer
-could pick, matching `twzrd-x402-gate@0.12.0`'s own wrapper:
+could pick, matching `twzrd-x402-gate@0.12.5`'s own wrapper:
 
 - x402 v2 requirements are read from the `PAYMENT-REQUIRED` header (base64 JSON)
   before the body. An undecodable header is refused. 0.3.0 refused every
@@ -116,7 +131,7 @@ Each piece below works alone. Plugged into the hosted checks, they form one pre-
 
 ```bash
 npm install twzrd-preflight
-# depends on twzrd-x402-gate@0.12.0 (exact)
+# depends on twzrd-x402-gate@0.12.5 (exact)
 ```
 
 Register in your OpenClaw config:
@@ -226,11 +241,11 @@ or full params are forwarded. The endpoint is configurable.
 ## Test
 
 ```bash
-npm test    # 40 passed (live FREE preflight + injected 402 / 0.12.0 API smoke + conflict, card-outage, v2 header, every-offer, asset cases; no auth, no payments)
+npm test    # 40 passed (live FREE preflight + injected 402 / 0.12.5 API smoke + conflict, card-outage, v2 header, every-offer, asset cases; no auth, no payments)
 ```
 
 Verified against OpenClaw **2026.7.1-2** (`openclaw.build.openclawVersion` + T10c).
-Gate pin: `twzrd-x402-gate@0.12.0`. Refuse-bin spawn without `@x402/*` peers is a
+Gate pin: `twzrd-x402-gate@0.12.5`. Refuse-bin spawn without `@x402/*` peers is a
 missing-peer fail (exit 2), not a live dogfood EXTERNAL_RUN.
 
 ## CLI
