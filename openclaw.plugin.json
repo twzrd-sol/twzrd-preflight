@@ -1,7 +1,7 @@
 {
   "id": "twzrd-preflight",
   "name": "TWZRD Preflight",
-  "description": "Trust gate: wrapFetchWithTwzrdPreflight on HTTP 402 (wash refuse) plus payment-shaped tool-call hooks. Defaults: enforce, fail-closed, wash refuse on. Shadow/fail-open/wash-off are opt-in.",
+  "description": "Trust gate: wrapFetchWithTwzrdPreflight on HTTP 402 (wash refuse) plus payment-shaped tool-call hooks. Defaults: enforce, fail-closed, wash refuse on; the tool-call hook also refuses an uncapped warn, an unevaluated seller and unknown wash coverage. Shadow/fail-open/each opt-out are opt-in.",
   "version": "0.4.3",
   "configSchema": {
     "type": "object",
@@ -11,7 +11,7 @@
         "type": "string",
         "enum": ["off", "shadow", "enforce"],
         "default": "enforce",
-        "description": "off = disabled; shadow = evaluate + log would-blocks, never block (opt-in); enforce = block on decision=block or wash_flagged."
+        "description": "off = disabled; shadow = evaluate + log would-blocks, never block (opt-in); enforce = block on every refusal rule below."
       },
       "failMode": {
         "type": "string",
@@ -23,6 +23,26 @@
         "type": "boolean",
         "default": true,
         "description": "Refuse payTo when free merchant_card.wash_flagged is true. Opt out with false."
+      },
+      "refuseWashUnknown": {
+        "type": "boolean",
+        "default": true,
+        "description": "Tool-call hook: refuse a payTo whose merchant_card does not show full, fresh wash coverage (wash_flagged not a boolean, wash_stale, ring_evaluated false, confidence other than full, or no card). Read only while refuseWashFlagged is on. The 402 wrap follows twzrd-x402-gate 0.12.5 (TWZRD_REFUSE_WASH_UNKNOWN). Opt out with false."
+      },
+      "refuseUncappedWarn": {
+        "type": "boolean",
+        "default": true,
+        "description": "Tool-call hook: refuse a warn whose readiness card has no recommended_cap_usdc, or a call that names no price to hold to it. Opt out with false."
+      },
+      "refuseUnevaluated": {
+        "type": "boolean",
+        "default": true,
+        "description": "Tool-call hook: refuse a seller intel has never evaluated (null_reason set, or score null). false pays it within the card's recommended_cap_usdc at a known price."
+      },
+      "refuseUnparsedPayments": {
+        "type": "boolean",
+        "default": true,
+        "description": "Refuse a payment-shaped tool call whose payee cannot be read: an exec curl/wget sending a signed PAYMENT-SIGNATURE or X-PAYMENT header with no seller wallet and no observed 402 payTo for its origin, or a payment-named tool (agentcash or x402 in the name, or pay/payment as a whole word) whose URL is not in an origin or url param. Opt out with false."
       },
       "timeoutMs": {
         "type": "number",

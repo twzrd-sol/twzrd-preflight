@@ -1,0 +1,40 @@
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  harness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # openclaw (a dev dependency, read by T10c and T10e) needs Node >=24.16. On 20 and
+        # 22 it is not installed, and those two tests skip; every other test runs.
+        include:
+          - node: 20
+            install: npm ci --ignore-scripts --omit=dev
+          - node: 22
+            install: npm ci --ignore-scripts --omit=dev
+          - node: 24
+            install: npm ci --ignore-scripts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: ${{ matrix.install }}
+      # Offline: intel is stubbed at fetch, and the run fails on any request it has no
+      # recorded answer for. TWZRD_PREFLIGHT_LIVE is never set here.
+      - run: npm test

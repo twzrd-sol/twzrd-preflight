@@ -12,6 +12,17 @@
 OpenClaw plugin **0.4.3**: install = intercept. Pin **`twzrd-x402-gate@0.12.5`**
 (exact; same line as other TWZRD seats).
 
+**On `main`, not in a release:**
+
+- The `before_tool_call` hook refuses a payment-shaped call whose payee it cannot read, where
+  0.4.3 let it run unchecked. See [What it covers](#what-it-covers-honest). Opt out with
+  `refuseUnparsedPayments: false`.
+- The hook applies the readiness and wash rules of `twzrd-x402-gate` 0.13.0, copied into this
+  plugin because its pin stays at 0.12.5. 0.4.3 refused only `decision: "block"` and
+  `wash_flagged: true`. See [Gate rules](#gate-rules) for what now refuses, and the three
+  opt-outs (`refuseUncappedWarn`, `refuseUnevaluated`, `refuseWashUnknown`). The 402 wrap is
+  unchanged.
+
 0.4.3 moves the gate pin from 0.12.0 to 0.12.5. By default nothing this plugin
 decides changes:
 
@@ -161,6 +172,10 @@ proof, not an EXTERNAL_RUN. No invented ALLOW txs.
 | `mode` | `"enforce"` | `off` / `shadow` (opt-in log-only) / `enforce` |
 | `failMode` | `"closed"` | `closed` (block on intel outage) or `open` (opt-in allow) |
 | `refuseWashFlagged` | `true` | Refuse when merchant_card.wash_flagged; opt out with `false` |
+| `refuseWashUnknown` | `true` | Tool-call hook: refuse when the merchant card does not show full, fresh wash coverage. Read only while `refuseWashFlagged` is on; opt out with `false` |
+| `refuseUncappedWarn` | `true` | Tool-call hook: refuse a `warn` with no `recommended_cap_usdc`, or a call naming no price; opt out with `false` |
+| `refuseUnevaluated` | `true` | Tool-call hook: refuse a seller intel never evaluated; `false` pays it within the card's cap at a known price |
+| `refuseUnparsedPayments` | `true` | Refuse a payment-shaped tool call whose payee cannot be read (see below); opt out with `false` |
 | `timeoutMs` | `5000` | Preflight HTTP timeout in ms |
 | `maxPriceUsdc` | `null` | Local price ceiling — blocks above this USDC amount without API call |
 | `endpoint` | `"https://intel.twzrd.xyz"` | TWZRD intel API base URL |
@@ -169,7 +184,18 @@ proof, not an EXTERNAL_RUN. No invented ALLOW txs.
 | `cacheTtlMs` | `3600000` | TTL for per-seller decision and 402 origin cache (1 hour) |
 | `matchers` | `[]` | Custom tool matchers for coverage beyond built-in rails |
 
-Example opt-in (legacy shadow / fail-open / wash-off):
+`createGate(config, logger)` also takes `onDecision`, a function, which is not plugin JSON
+config. The hook calls it once for every outcome intel decided (not for the local allow, deny
+and price lists) with `{ decision, reason_code, twzrd_reason, pays, payee }`. `decision` and
+`reason_code` are `twzrd.payment_decision.v1` values: `allow`/`ALLOW`, `warn`/`INTEL_WARN`,
+`warn`/`UNKNOWN_UNDER_LIMIT`, `block`/`INTEL_BLOCK`, `block`/`WASH_FLAGGED`,
+`block`/`UNKNOWN_ABOVE_LIMIT`, or `unavailable`/`INTEL_UNAVAILABLE` (an outage, refused or let
+through by `failMode: "open"`). `pays` is whether the call ran, so a `shadow` would-block reports
+`block` with `pays: true`. A callback that throws or rejects never changes the verdict.
+
+Example opt-in (legacy shadow / fail-open / wash-off). Setting `refuseUncappedWarn`,
+`refuseUnevaluated` and `refuseWashUnknown` to `false` as well comes closest to the 0.4.3 tool
+hook, but a missing card and a price above the card's cap still refuse:
 
 ```json
 {
@@ -216,19 +242,68 @@ Built-in coverage: AgentCash MCP tools + exec/curl x402 payments. For other paym
 - **MCP payment tools** (AgentCash `fetch`/`bridge` style): counterparty = `origin`/`url`
   param, upgraded to the real Solana `payTo` wallet once a 402 envelope has been observed
   (`after_tool_call` cache).
-- **exec/curl x402 payments**: conservative regex extraction of `seller_wallet`/`payTo`/
-  `price_usdc`/`resource_name` from the command string. Failed parse = no gate (never blocks
-  on extraction bugs).
+- **exec/curl x402 payments**: regex extraction of `seller_wallet`/`payTo`/`price_usdc`/
+  `resource_name` from the command string. A curl or wget command that sends a signed
+  `PAYMENT-SIGNATURE` or `X-PAYMENT` header (`-H` / `--header`) with no seller wallet is
+  checked against the `payTo` this gate saw in that origin's 402 (`after_tool_call` cache).
 - **Custom matchers**: operator-defined tool + param mappings for any other payment rail.
+- **A payment it cannot read is refused** (`refuseUnparsedPayments`, default on). Two shapes:
+  - an exec command sending a signed payment header to a URL, with no seller wallet and no
+    observed 402 for its origin. The header was signed before the hook ran, so the refusal
+    stops the payment being sent, not the signing, and carries no refuse transcript;
+  - a payment-named tool that carries a URL outside the `origin`/`url` params. Payment-named
+    means `agentcash` or `x402` anywhere in the name, or `pay`, `pays`, `payment` or
+    `payments` as a whole word (not `payload` or `taxpayer`). The tool does not run, so
+    neither does its signer.
+
+  A refusal applies whatever `failMode` says (it is not an outage), and `shadow` logs it as a
+  would-block. A read-only tool in a payment-named family, such as one whose `resource_url`
+  param is not read, is refused too; a custom matcher for it turns the refusal into a check.
 - **NOT covered**: ClawRouter proxy settlements (sign inside localhost:8402, invisible to tool
-  hooks — needs ClawRouter's upstream `onBeforePayment` hook).
+  hooks — needs ClawRouter's upstream `onBeforePayment` hook). An exec that pays inside another
+  CLI, with no payment header on its command line, is not seen. A payee named inside the
+  header payload is not decoded. A signed-header command checked against a cached `payTo`
+  carries no price, so `maxPriceUsdc` and the card's cap do not apply to it; a `warn` payee
+  there is refused instead (`twzrd_warn_unknown_price`).
+- **Wash checks need a wallet.** A payee known only by its origin (an AgentCash call before
+  its 402 is seen) has no merchant card to read, so `refuseWashFlagged` and
+  `refuseWashUnknown` do not apply to it. The readiness rules do.
 
 ## Gate rules
 
-- Block iff `decision === "block"`. Never gates on `can_spend` (unknown wallets score warn/45,
-  which is allowed by default).
+The tool-call hook's rules copy `twzrd-x402-gate` 0.13.0 (`evaluateReadinessCard` and the
+merchant-card wash check), with the gate's reason strings. They run in the gate's order:
+
+| Refuses | Reason | Opt-out |
+|---|---|---|
+| A card that says `block` | `twzrd_decision_block` | `allowWallets` |
+| No readiness card, or a decision other than `allow`, `warn` or `block` | `twzrd_decision_<decision>` (`undefined` when missing) | `allowWallets` |
+| A seller intel never evaluated (`null_reason` set, or `score: null`) | `twzrd_unevaluated_subject_<null_reason>` (`score_null` when no reason) | `refuseUnevaluated: false` |
+| With that opt-out: no cap, no price, or a price over the cap | `twzrd_unevaluated_no_cap_<nr>`, `_unknown_price_<nr>`, `_over_cap_<p>_gt_<c>` | `allowWallets` |
+| A `warn` with no `recommended_cap_usdc` | `twzrd_warn_no_cap` | `refuseUncappedWarn: false` |
+| A `warn` on a call naming no price | `twzrd_warn_unknown_price` | `refuseUncappedWarn: false` |
+| A price above an approved card's cap (`allow` or `warn`) | `twzrd_over_recommended_cap_<p>_gt_<c>` | `allowWallets` |
+| A wash-flagged payTo | `twzrd_wash_flagged` | `refuseWashFlagged: false` |
+| A merchant card without full, fresh coverage (or none) | `twzrd_wash_unknown` | `refuseWashUnknown: false` |
+
+Each refusal's `blockReason` names the reason and its opt-out. Within its cap, an unevaluated
+seller paid under `refuseUnevaluated: false` reports `warn`/`UNKNOWN_UNDER_LIMIT`.
+
+Differences from the gate:
+
+- This plugin has no minimum trust score and no `gateOnCanSpend`, so a low `trust_score` or
+  `can_spend: false` alone never refuses.
+- The gate reads a card with no decision as `warn` and refuses it on its minimum score; this
+  plugin refuses that card by name.
+- The gate approves a decision string it does not know as `allow`; this plugin refuses it.
+- The gate records a payment let through by `failMode: "open"` after a merchant card outage
+  with the readiness card's verdict; this plugin records it as `unavailable`/`INTEL_UNAVAILABLE`.
+
+- Never gates on `can_spend` alone.
 - `shadow` mode: evaluates + logs would-blocks, never blocks.
 - Fail-closed by default: trust API unreachable = block (`failMode: "open"` is opt-in allow).
+- A payment-shaped call with no readable payee = block, in either `failMode`
+  (`refuseUnparsedPayments: false` is opt-in skip).
 - Local policy (denylist, allowlist, price cap) runs without any API call.
 - Loop guard: calls to the trust API itself are never gated.
 
@@ -241,8 +316,22 @@ or full params are forwarded. The endpoint is configurable.
 ## Test
 
 ```bash
-npm test    # 40 passed (live FREE preflight + injected 402 / 0.12.5 API smoke + conflict, card-outage, v2 header, every-offer, asset cases; no auth, no payments)
+npm test                          # offline: intel stubbed at fetch, no network
+TWZRD_PREFLIGHT_LIVE=1 npm test   # the same tests against the LIVE free preflight (no auth, no payments)
 ```
+
+Offline, the stub answers only for the two sellers the harness records (one `block`, one
+`warn`, each with a clean merchant card), and the run fails on any other intel request. The
+`Test` workflow runs it offline on Node 20, 22 and 24; the openclaw contract checks (T10c,
+T10e) run on 24 only, because openclaw needs Node >=24.16.
+
+`npm test` also runs `test/guard-vectors.test.mjs`: the shared guard vectors from
+[twzrd-trust](https://github.com/twzrd-sol/twzrd-trust/tree/main/docs/vectors), vendored in
+`test/fixtures` with the commit and sha256 they were copied from, played through the
+`before_tool_call` hook. The hook agrees on 8 of 17. On the other 9 it lets the payment run
+where the vectors refuse, or records a different reason. Each is pinned in the test with the
+outcome it reaches and why: it has no cap rule, no unevaluated rule and no wash-coverage rule,
+and it reads a preflight answer with no card as `warn`.
 
 Verified against OpenClaw **2026.7.1-2** (`openclaw.build.openclawVersion` + T10c).
 Gate pin: `twzrd-x402-gate@0.12.5`. Refuse-bin spawn without `@x402/*` peers is a
