@@ -1,5 +1,5 @@
 /**
- * twzrd-preflight — OpenClaw plugin (0.4.3)
+ * twzrd-preflight — OpenClaw plugin (0.5.0)
  *
  * Two seams:
  *   1) wrapFetchWithTwzrdPreflight — HTTP 402 intercept (install = intercept).
@@ -9,7 +9,7 @@
  * Factory defaults: enforce, fail-closed, refuseWashFlagged, refuseWashUnknown,
  * refuseUncappedWarn and refuseUnevaluated on. Shadow / fail-open / each opt-out is opt-in.
  *
- * Gate rules for tool calls, copied from twzrd-x402-gate 0.13.0 (this plugin pins 0.12.5):
+ * Gate rules for tool calls, copied from twzrd-x402-gate 0.13.0, which this plugin pins:
  * a card that is missing or says block refuses; a warn is paid only under its own
  * recommended_cap_usdc at a known price; a seller intel never evaluated refuses; a
  * wash_flagged payTo refuses; a merchant card without full, fresh wash coverage refuses.
@@ -114,7 +114,7 @@ function isUnevaluatedCard(card) {
 
 /**
  * The readiness card rules of twzrd-x402-gate 0.13.0 evaluateReadinessCard (src/policy.ts),
- * copied because this plugin pins 0.12.5, with the gate's reason strings. Pure: no network.
+ * copied (with the differences below) and with the gate's reason strings. Pure: no network.
  *
  * Differences from the gate. This plugin has no preflightMinScore or gateOnCanSpend, so a low
  * trust_score or can_spend false alone never refuses. A card with no decision is refused by
@@ -700,7 +700,7 @@ const plugin = {
   id: "twzrd-preflight",
   name: "TWZRD Preflight",
   description:
-    "Trust gate: wrapFetchWithTwzrdPreflight on HTTP 402 (wash refuse) plus payment-shaped tool-call hooks. Defaults: enforce, fail-closed, wash refuse on.",
+    "Trust gate on twzrd-x402-gate 0.13.0: wrapFetchWithTwzrdPreflight on HTTP 402 plus payment-shaped tool-call hooks. Defaults: enforce, fail-closed; wash flagged or unknown, an uncapped warn and an unevaluated seller refuse.",
   register(api) {
     const gate = createGate(api.pluginConfig ?? {}, api.logger ?? console);
     // OpenClaw's plugin API registers hooks via `registerHook`, NOT `api.on`.
