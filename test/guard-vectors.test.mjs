@@ -30,7 +30,7 @@ const FIXTURE = new URL("./fixtures/twzrd.payment_decision.v1.guard-vectors.json
 const SOURCE = {
   repo: "twzrd-sol/twzrd-trust",
   path: "docs/vectors/twzrd.payment_decision.v1.guard-vectors.json",
-  commit: "7c3bdc023dd279a159aa9c613a3c77fe5c7662e0",
+  commit: "06864b7dd0ab22bb8b42aff446a8f087f188fd77",
   sha256: "9b36af94b04c653fb7dc8cb88111faffe2c0f043983e54e10d48de5a29d44370",
 };
 const RAW = readFileSync(FIXTURE);
