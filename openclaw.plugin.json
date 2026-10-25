@@ -1,8 +1,8 @@
 {
   "id": "twzrd-preflight",
   "name": "TWZRD Preflight",
-  "description": "Trust gate: wrapFetchWithTwzrdPreflight on HTTP 402 (wash refuse) plus payment-shaped tool-call hooks. Defaults: enforce, fail-closed, wash refuse on; the tool-call hook also refuses an uncapped warn, an unevaluated seller and unknown wash coverage. Shadow/fail-open/each opt-out are opt-in.",
-  "version": "0.4.3",
+  "description": "Trust gate on twzrd-x402-gate 0.13.0: wrapFetchWithTwzrdPreflight on HTTP 402 plus payment-shaped tool-call hooks. Defaults: enforce, fail-closed; wash flagged or unknown, an uncapped warn and an unevaluated seller refuse. Shadow/fail-open/each opt-out are opt-in.",
+  "version": "0.5.0",
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
@@ -27,7 +27,7 @@
       "refuseWashUnknown": {
         "type": "boolean",
         "default": true,
-        "description": "Tool-call hook: refuse a payTo whose merchant_card does not show full, fresh wash coverage (wash_flagged not a boolean, wash_stale, ring_evaluated false, confidence other than full, or no card). Read only while refuseWashFlagged is on. The 402 wrap follows twzrd-x402-gate 0.12.5 (TWZRD_REFUSE_WASH_UNKNOWN). Opt out with false."
+        "description": "Tool-call hook: refuse a payTo whose merchant_card does not show full, fresh wash coverage (wash_flagged not a boolean, wash_stale, ring_evaluated false, confidence other than full, or no card). Read only while refuseWashFlagged is on. wrapFetchWithTwzrdPreflight takes the same option; unset, it follows twzrd-x402-gate 0.13.0 (TWZRD_REFUSE_WASH_UNKNOWN, else on). Opt out with false."
       },
       "refuseUncappedWarn": {
         "type": "boolean",

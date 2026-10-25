@@ -1,27 +1,36 @@
 # twzrd-preflight
 
-> **Status (2026-10-23): frozen reference implementation.** This plugin is maintained as a
+> **Status (2026-10-25): reference implementation.** This plugin is maintained as a
 > worked example of a TWZRD seat (a `before_tool_call` hook plus a 402 fetch wrap over
-> `twzrd-x402-gate`), pinned at gate **0.12.5**. Its gate pin is no longer bumped on each gate
-> release; the live, maintained surface is the gate itself (`twzrd-x402-gate` in
-> `twzrd-sol/twzrd-trust`). Operator decision after a 90-day usage review: every call this
-> plugin has made to intel fell on its own release and test days, with no external host running
-> it. It will be unfrozen when a named OpenClaw or Hermes host adopts it. 0.4.3 is the one
-> pin move onto the current gate line.
+> `twzrd-x402-gate`). Its gate pin is not bumped on each gate release; the live, maintained
+> surface is the gate itself (`twzrd-x402-gate` in `twzrd-sol/twzrd-trust`). The plugin was
+> frozen on 2026-10-23 after a 90-day usage review: every call it made to intel fell on its own
+> release and test days, with no external host running it. 0.5.0 is an operator-approved
+> release onto gate 0.13.0. The 402 wrap is the gate's own wrapper with its defaults. The hook
+> copies the gate's readiness and wash rules, with the differences listed under
+> [Gate rules](#gate-rules), and agrees with the gate on all 17 shared guard vectors.
 
-OpenClaw plugin **0.4.3**: install = intercept. Pin **`twzrd-x402-gate@0.12.5`**
+OpenClaw plugin **0.5.0**: install = intercept. Pin **`twzrd-x402-gate@0.13.0`**
 (exact; same line as other TWZRD seats).
 
-**On `main`, not in a release:**
+0.5.0 moves the gate pin from 0.12.5 to 0.13.0, and it changes what this plugin refuses by
+default:
 
-- The `before_tool_call` hook refuses a payment-shaped call whose payee it cannot read, where
-  0.4.3 let it run unchecked. See [What it covers](#what-it-covers-honest). Opt out with
+- **The `before_tool_call` hook** applies the readiness and wash rules of gate 0.13.0. 0.4.3
+  refused only `decision: "block"` and `wash_flagged: true`. See [Gate rules](#gate-rules) for
+  what now refuses and the three opt-outs (`refuseUncappedWarn`, `refuseUnevaluated`,
+  `refuseWashUnknown`). The rules are copied into the hook, with the differences listed there.
+- **The hook refuses a payment-shaped call whose payee it cannot read**, where 0.4.3 let it run
+  unchecked. See [What it covers](#what-it-covers-honest). Opt out with
   `refuseUnparsedPayments: false`.
-- The hook applies the readiness and wash rules of `twzrd-x402-gate` 0.13.0, copied into this
-  plugin because its pin stays at 0.12.5. 0.4.3 refused only `decision: "block"` and
-  `wash_flagged: true`. See [Gate rules](#gate-rules) for what now refuses, and the three
-  opt-outs (`refuseUncappedWarn`, `refuseUnevaluated`, `refuseWashUnknown`). The 402 wrap is
-  unchanged.
+- **The 402 wrap** gets gate 0.13.0's defaults through `resolveConfig`: a `warn` with no cap, a
+  seller intel never evaluated, and a merchant card without full, fresh wash coverage now
+  refuse. It takes the same three options as the hook. Unset, each one follows the gate's
+  `TWZRD_REFUSE_*` env var, else it is on. The hook ignores those env vars. Tests T30, T31 and
+  T49 pin both.
+- **`onDecision`** reports each hook outcome as a `twzrd.payment_decision.v1` decision and
+  reason code (see [Configuration](#configuration)).
+- **The shared guard vectors** agree on 17 of 17 (see [Test](#test)).
 
 0.4.3 moves the gate pin from 0.12.0 to 0.12.5. By default nothing this plugin
 decides changes:
@@ -35,7 +44,7 @@ decides changes:
   `before_tool_call` hook.
 - `refuseWashUnknown` stays opt-in until 0.13.0. This plugin passes no such option.
   `TWZRD_REFUSE_WASH_UNKNOWN=1` still reaches the 402 wrap through `resolveConfig`,
-  and not the tool hook. Tests T30 and T31 pin both.
+  and not the tool hook.
 
 0.4.2 moved the gate pin from 0.11.4 to 0.12.0. By default nothing that release
 decided changed:
@@ -46,7 +55,7 @@ decided changed:
   no such option, so it stays off. The gate's environment switch
   `TWZRD_REFUSE_WASH_UNKNOWN=1` does reach the 402 wrap, because the wrap builds its
   config with the gate's `resolveConfig`. It does not reach the `before_tool_call`
-  hook, which applies wash policy itself. Tests T30 and T31 pin both. The gate
+  hook, which applies wash policy itself. The gate
   plans to turn the option on by default in 0.13.0, which this exact pin will not
   pick up on its own.
 - The gate's own `wrapFetchWithTwzrdGate`, which the 402 wrap here mirrors, is the
@@ -60,10 +69,11 @@ and T29).
 
 `wrapFetchWithTwzrdPreflight` runs TWZRD preflight + merchant_card **wash refuse**
 on every HTTP **402** before a signer can attach payment. Defaults: **enforce**,
-**fail-closed**, **refuseWashFlagged on**. Shadow / fail-open / wash-off are opt-in.
+**fail-closed**, **refuseWashFlagged on**, and gate 0.13.0's `refuseWashUnknown`,
+`refuseUncappedWarn` and `refuseUnevaluated` on. Shadow / fail-open / each opt-out are opt-in.
 
 Since 0.4.0 it reads a 402 the way the payer does and checks every offer the payer
-could pick, matching `twzrd-x402-gate@0.12.5`'s own wrapper:
+could pick, matching the gate's own wrapper (`twzrd-x402-gate@0.13.0`):
 
 - x402 v2 requirements are read from the `PAYMENT-REQUIRED` header (base64 JSON)
   before the body. An undecodable header is refused. 0.3.0 refused every
@@ -142,7 +152,7 @@ Each piece below works alone. Plugged into the hosted checks, they form one pre-
 
 ```bash
 npm install twzrd-preflight
-# depends on twzrd-x402-gate@0.12.5 (exact)
+# depends on twzrd-x402-gate@0.13.0 (exact)
 ```
 
 Register in your OpenClaw config:
@@ -183,6 +193,12 @@ proof, not an EXTERNAL_RUN. No invented ALLOW txs.
 | `denyWallets` | `[]` | Always-block seller wallet addresses (no API call) |
 | `cacheTtlMs` | `3600000` | TTL for per-seller decision and 402 origin cache (1 hour) |
 | `matchers` | `[]` | Custom tool matchers for coverage beyond built-in rails |
+
+`wrapFetchWithTwzrdPreflight(fetch, opts)` takes `endpoint`, `failMode`, `refuseWashFlagged`,
+`refuseWashUnknown`, `refuseUncappedWarn` and `refuseUnevaluated` as well. Unset, the last three
+follow the gate's `TWZRD_REFUSE_WASH_UNKNOWN`, `TWZRD_REFUSE_UNCAPPED_WARN` and
+`TWZRD_REFUSE_UNEVALUATED`, and they are on when those are unset. The plugin JSON config drives
+the hook only.
 
 `createGate(config, logger)` also takes `onDecision`, a function, which is not plugin JSON
 config. The hook calls it once for every outcome intel decided (not for the local allow, deny
@@ -328,13 +344,12 @@ T10e) run on 24 only, because openclaw needs Node >=24.16.
 `npm test` also runs `test/guard-vectors.test.mjs`: the shared guard vectors from
 [twzrd-trust](https://github.com/twzrd-sol/twzrd-trust/tree/main/docs/vectors), vendored in
 `test/fixtures` with the commit and sha256 they were copied from, played through the
-`before_tool_call` hook. The hook agrees on 8 of 17. On the other 9 it lets the payment run
-where the vectors refuse, or records a different reason. Each is pinned in the test with the
-outcome it reaches and why: it has no cap rule, no unevaluated rule and no wash-coverage rule,
-and it reads a preflight answer with no card as `warn`.
+`before_tool_call` hook, both as an exec curl and as a payment-named tool. The hook agrees on
+17 of 17, and the test's `KNOWN_DIVERGENCE` list is empty. Each outcome is read from
+`onDecision`, which must fire exactly once and match what the hook did.
 
 Verified against OpenClaw **2026.7.1-2** (`openclaw.build.openclawVersion` + T10c).
-Gate pin: `twzrd-x402-gate@0.12.5`. Refuse-bin spawn without `@x402/*` peers is a
+Gate pin: `twzrd-x402-gate@0.13.0`. Refuse-bin spawn without `@x402/*` peers is a
 missing-peer fail (exit 2), not a live dogfood EXTERNAL_RUN.
 
 ## CLI

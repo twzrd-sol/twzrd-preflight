@@ -1,14 +1,14 @@
 /**
  * HTTP 402 intercept for twzrd-preflight.
  *
- * Thin wrapper around twzrd-x402-gate@0.12.5 policy (the same steps as the gate's
+ * Thin wrapper around twzrd-x402-gate@0.13.0 policy (the same steps as the gate's
  * own wrapFetchWithTwzrdGate): on 402, read the requirements (v2 PAYMENT-REQUIRED
  * header first, then the body) and approve EVERY distinct accepts[] entry via
  * preflight + merchant_card wash refuse. Denied 402s throw before the caller can
  * attach a payment / invoke a signer. Non-402 responses pass through with no intel
  * call.
  *
- * Public 0.12.5 APIs used here: priceUsdcFromAmountMicro, requirementAsset,
+ * Public 0.13.0 APIs used here: priceUsdcFromAmountMicro, requirementAsset,
  * resolveConfig, resolveRequirementFields, twzrdApprovePayment.
  * resolveRequirementFields reports `conflict` (amount_field_conflict,
  * amount_malformed, payto_field_conflict) and leaves the field undefined; that is
@@ -24,7 +24,7 @@ import {
   twzrdApprovePayment,
 } from "twzrd-x402-gate";
 
-/** Same limits and reason code as the gate's own wrappers (twzrd-x402-gate 0.12.5). */
+/** Same limits and reason code as the gate's own wrappers (twzrd-x402-gate 0.13.0). */
 export const MAX_DISTINCT_OFFERS = 8;
 export const TOO_MANY_PAYMENT_OPTIONS = "too_many_payment_options";
 
@@ -80,16 +80,23 @@ function requestUrl(input) {
 /**
  * Map plugin opts onto twzrd-x402-gate resolveConfig.
  * Defaults: refuseWashFlagged on, fail-closed (failOpen false).
+ * refuseWashUnknown, refuseUnevaluated and refuseUncappedWarn pass through when they are
+ * booleans, so the plugin config that opts the tool-call hook out opts this wrap out too.
+ * Unset, the gate decides: its TWZRD_REFUSE_* env var, else on (gate 0.13.0 defaults).
  */
 export function gateConfigFromPluginOpts(opts = {}) {
   const fetchImpl = opts.fetch ?? globalThis.fetch.bind(globalThis);
   const failMode = opts.failMode ?? "closed";
   const refuseWashFlagged = opts.refuseWashFlagged ?? true;
+  const flag = (v) => (typeof v === "boolean" ? v : undefined);
   return resolveConfig({
     intelBase: opts.endpoint ?? opts.intelBase,
     fetch: fetchImpl,
     failOpen: failMode === "open",
     refuseWashFlagged,
+    refuseWashUnknown: flag(opts.refuseWashUnknown),
+    refuseUnevaluated: flag(opts.refuseUnevaluated),
+    refuseUncappedWarn: flag(opts.refuseUncappedWarn),
     attribution: {
       integration: "twzrd-preflight",
       runId: opts.runId ?? `preflight-${Date.now().toString(16)}`,
