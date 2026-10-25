@@ -29,7 +29,7 @@
     "twzrd-x402-gate": "0.12.5"
   },
   "scripts": {
-    "test": "node test/harness.mjs"
+    "test": "node test/harness.mjs && node --test test/guard-vectors.test.mjs"
   },
   "keywords": [
     "openclaw",

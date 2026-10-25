@@ -1,0 +1,253 @@
+{
+  "schema": "twzrd.guard_vectors.v1",
+  "decision_contract": "twzrd.payment_decision.v1",
+  "$comment": "Shared guard vectors. Each vector is the evidence intel serves, the buyer's policy, and the outcome every pre-sign guard must reach: whether it lets the payment be signed (pays) and the payment_decision.v1 decision and reason_code it records. Evidence is served by a stub at each guard's HTTP boundary; no vector needs live intel. A guard runs a vector when its id is in applies_to, and states why otherwise in not_applicable. The policy of a vector is policy_baseline with the vector's policy merged over it, and a runner passes every key explicitly, so no expected outcome depends on a guard's defaults. A refusal must make zero signer calls and zero RPC calls. Canonical copy: docs/vectors in twzrd-trust; twzrd-x402-gate/test/fixtures holds a byte-identical copy.",
+  "challenge": {
+    "scheme": "exact",
+    "network": "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp",
+    "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "amount": "1000",
+    "price_usdc": 0.001,
+    "pay_to": "CktRuQ2mttgRGkXJtyksdKHjUdc2C4TgDzyB98oEzy8"
+  },
+  "policy_baseline": {
+    "fail_open": false,
+    "min_trust_score": 40,
+    "gate_on_can_spend": false,
+    "refuse_unevaluated": true,
+    "refuse_uncapped_warn": true,
+    "refuse_wash_flagged": true,
+    "refuse_wash_unknown": true,
+    "wash_max_usdc": null
+  },
+  "guards": {
+    "x402-gate": "twzrd-x402-gate: the before-payment hook behind createGuardedX402Fetch, run with a counting signer; its approval is projected by decisionFromApproval.",
+    "plugin-trustgate": "@wzrd_sol/plugin-trustgate: canSpendSafely / checkTrust, the readiness-card guard behind the eliza provider and the Faremeter payerChooser.",
+    "twzrd-preflight": "twzrd-preflight: the OpenClaw before_tool_call hook, run on an exec curl that names the seller wallet and price. It reads the preflight decision and the merchant card's wash_flagged.",
+    "receipt-consumer": "A consumer that stores a paid receipt and decides whether to reuse it (evaluateRecall in @wzrd_sol/sdk)."
+  },
+  "vectors": [
+    {
+      "id": "allow",
+      "covers": "allow",
+      "description": "An evaluated seller intel allows, with full wash coverage and no wash finding.",
+      "applies_to": ["x402-gate", "plugin-trustgate", "twzrd-preflight"],
+      "evidence": {
+        "preflight": { "status": 200, "body": { "readiness_card": { "decision": "allow", "trust_score": 80, "score": 0.8, "can_spend": true, "recommended_cap_usdc": 1 } } },
+        "merchant_card": { "status": 200, "body": { "wash_flagged": false, "confidence": "full", "ring_evaluated": true } }
+      },
+      "policy": {},
+      "expect": { "pays": true, "decision": "allow", "reason_code": "ALLOW" }
+    },
+    {
+      "id": "warn_under_cap",
+      "covers": "warn under cap",
+      "description": "Intel says warn with a $0.01 cap; the $0.001 price is under it.",
+      "applies_to": ["x402-gate", "plugin-trustgate", "twzrd-preflight"],
+      "evidence": {
+        "preflight": { "status": 200, "body": { "readiness_card": { "decision": "warn", "trust_score": 60, "score": 0.6, "can_spend": true, "recommended_cap_usdc": 0.01 } } },
+        "merchant_card": { "status": 200, "body": { "wash_flagged": false, "confidence": "full", "ring_evaluated": true } }
+      },
+      "policy": {},
+      "expect": { "pays": true, "decision": "warn", "reason_code": "INTEL_WARN" }
+    },
+    {
+      "id": "warn_over_cap",
+      "covers": "warn over cap",
+      "description": "Intel says warn with a $0.0005 cap; the $0.001 price is over it.",
+      "applies_to": ["x402-gate", "plugin-trustgate", "twzrd-preflight"],
+      "evidence": {
+        "preflight": { "status": 200, "body": { "readiness_card": { "decision": "warn", "trust_score": 60, "score": 0.6, "can_spend": true, "recommended_cap_usdc": 0.0005 } } },
+        "merchant_card": { "status": 200, "body": { "wash_flagged": false, "confidence": "full", "ring_evaluated": true } }
+      },
+      "policy": {},
+      "expect": { "pays": false, "decision": "block", "reason_code": "INTEL_BLOCK" }
+    },
+    {
+      "id": "warn_no_cap",
+      "covers": "warn over cap",
+      "description": "Intel says warn and states no cap, so there is no ceiling to stay under.",
+      "applies_to": ["x402-gate", "plugin-trustgate", "twzrd-preflight"],
+      "evidence": {
+        "preflight": { "status": 200, "body": { "readiness_card": { "decision": "warn", "trust_score": 60, "score": 0.6, "can_spend": true } } },
+        "merchant_card": { "status": 200, "body": { "wash_flagged": false, "confidence": "full", "ring_evaluated": true } }
+      },
+      "policy": {},
+      "expect": { "pays": false, "decision": "block", "reason_code": "INTEL_BLOCK" }
+    },
+    {
+      "id": "block",
+      "covers": "block",
+      "description": "Intel says block.",
+      "applies_to": ["x402-gate", "plugin-trustgate", "twzrd-preflight"],
+      "evidence": {
+        "preflight": { "status": 200, "body": { "readiness_card": { "decision": "block", "trust_score": 12, "score": 0.12, "can_spend": false } } },
+        "merchant_card": { "status": 200, "body": { "wash_flagged": false, "confidence": "full", "ring_evaluated": true } }
+      },
+      "policy": {},
+      "expect": { "pays": false, "decision": "block", "reason_code": "INTEL_BLOCK" }
+    },
+    {
+      "id": "missing_readiness_card",
+      "covers": "missing card",
+      "description": "The preflight answers 200 with no readiness card: no decision, no score, no cap.",
+      "applies_to": ["x402-gate", "plugin-trustgate", "twzrd-preflight"],
+      "evidence": {
+        "preflight": { "status": 200, "body": {} },
+        "merchant_card": { "status": 200, "body": { "wash_flagged": false, "confidence": "full", "ring_evaluated": true } }
+      },
+      "policy": {},
+      "expect": { "pays": false, "decision": "block", "reason_code": "INTEL_BLOCK" }
+    },
+    {
+      "id": "missing_merchant_card",
+      "covers": "missing card",
+      "description": "Intel allows, but the merchant card answers 404: intel holds no wash answer for this seller.",
+      "applies_to": ["x402-gate", "plugin-trustgate", "twzrd-preflight"],
+      "evidence": {
+        "preflight": { "status": 200, "body": { "readiness_card": { "decision": "allow", "trust_score": 80, "score": 0.8, "can_spend": true, "recommended_cap_usdc": 1 } } },
+        "merchant_card": { "status": 404, "body": { "detail": "not found" } }
+      },
+      "policy": {},
+      "expect": { "pays": false, "decision": "block", "reason_code": "INTEL_BLOCK" }
+    },
+    {
+      "id": "unevaluated",
+      "covers": "unevaluated",
+      "description": "Intel has never evaluated the seller (score null, null_reason unknown_subject); the card still says warn with a $0.10 cap, the shape live intel serves for a new wallet.",
+      "applies_to": ["x402-gate", "plugin-trustgate", "twzrd-preflight"],
+      "evidence": {
+        "preflight": { "status": 200, "body": { "readiness_card": { "decision": "warn", "trust_score": 45, "score": null, "null_reason": "unknown_subject", "can_spend": true, "recommended_cap_usdc": 0.1 } } },
+        "merchant_card": { "status": 200, "body": { "wash_flagged": false, "confidence": "full", "ring_evaluated": true } }
+      },
+      "policy": {},
+      "expect": { "pays": false, "decision": "block", "reason_code": "UNKNOWN_ABOVE_LIMIT" }
+    },
+    {
+      "id": "unevaluated_within_cap_opted_in",
+      "covers": "unevaluated",
+      "description": "The same evidence with refuse_unevaluated turned off explicitly: paid within the card's own cap, and recorded as an unknown counterparty, not as intel's warn.",
+      "applies_to": ["x402-gate", "plugin-trustgate", "twzrd-preflight"],
+      "evidence": {
+        "preflight": { "status": 200, "body": { "readiness_card": { "decision": "warn", "trust_score": 45, "score": null, "null_reason": "unknown_subject", "can_spend": true, "recommended_cap_usdc": 0.1 } } },
+        "merchant_card": { "status": 200, "body": { "wash_flagged": false, "confidence": "full", "ring_evaluated": true } }
+      },
+      "policy": { "refuse_unevaluated": false },
+      "expect": { "pays": true, "decision": "warn", "reason_code": "UNKNOWN_UNDER_LIMIT" }
+    },
+    {
+      "id": "wash_true",
+      "covers": "wash true",
+      "description": "Intel's readiness card allows, but the merchant card measures wash trading.",
+      "applies_to": ["x402-gate", "plugin-trustgate", "twzrd-preflight"],
+      "evidence": {
+        "preflight": { "status": 200, "body": { "readiness_card": { "decision": "allow", "trust_score": 80, "score": 0.8, "can_spend": true, "recommended_cap_usdc": 1 } } },
+        "merchant_card": { "status": 200, "body": { "wash_flagged": true, "confidence": "full", "ring_evaluated": true } }
+      },
+      "policy": {},
+      "expect": { "pays": false, "decision": "block", "reason_code": "WASH_FLAGGED" }
+    },
+    {
+      "id": "wash_unknown",
+      "covers": "wash unknown",
+      "description": "Intel allows; the merchant card answers but has no wash answer (wash_flagged null, no confidence): the card intel serves for a wallet it has never seen.",
+      "applies_to": ["x402-gate", "plugin-trustgate", "twzrd-preflight"],
+      "evidence": {
+        "preflight": { "status": 200, "body": { "readiness_card": { "decision": "allow", "trust_score": 80, "score": 0.8, "can_spend": true, "recommended_cap_usdc": 1 } } },
+        "merchant_card": { "status": 200, "body": { "wash_flagged": null } }
+      },
+      "policy": {},
+      "expect": { "pays": false, "decision": "block", "reason_code": "INTEL_BLOCK" }
+    },
+    {
+      "id": "wash_partial",
+      "covers": "wash unknown",
+      "description": "Intel allows; the merchant card says no wash finding but at partial confidence, with the ring check not run.",
+      "applies_to": ["x402-gate", "plugin-trustgate", "twzrd-preflight"],
+      "evidence": {
+        "preflight": { "status": 200, "body": { "readiness_card": { "decision": "allow", "trust_score": 80, "score": 0.8, "can_spend": true, "recommended_cap_usdc": 1 } } },
+        "merchant_card": { "status": 200, "body": { "wash_flagged": false, "confidence": "partial", "ring_evaluated": false } }
+      },
+      "policy": {},
+      "expect": { "pays": false, "decision": "block", "reason_code": "INTEL_BLOCK" }
+    },
+    {
+      "id": "stale_wash_evidence",
+      "covers": "stale receipt",
+      "description": "Intel allows; the merchant card's wash answer is marked stale (wash_stale). This is the stale evidence a guard that reads intel fresh on every payment can see.",
+      "applies_to": ["x402-gate", "plugin-trustgate", "twzrd-preflight"],
+      "evidence": {
+        "preflight": { "status": 200, "body": { "readiness_card": { "decision": "allow", "trust_score": 80, "score": 0.8, "can_spend": true, "recommended_cap_usdc": 1 } } },
+        "merchant_card": { "status": 200, "body": { "wash_flagged": false, "confidence": "full", "ring_evaluated": true, "wash_stale": true } }
+      },
+      "policy": {},
+      "expect": { "pays": false, "decision": "block", "reason_code": "INTEL_BLOCK" }
+    },
+    {
+      "id": "stale_receipt",
+      "covers": "stale receipt",
+      "description": "A stored paid receipt that allowed this seller is past the buyer's maximum age, and intel is unreachable for the re-check. A consumer that reuses the receipt pays; one that re-checks first refuses on the outage.",
+      "applies_to": ["receipt-consumer"],
+      "not_applicable": {
+        "x402-gate": "The gate takes no stored receipt: it reads the preflight and merchant card fresh for every payment. On this vector's fresh evidence (a preflight outage) it records outage_preflight's outcome.",
+        "plugin-trustgate": "checkTrust takes no stored receipt; it calls the preflight on every check.",
+        "twzrd-preflight": "The hook takes no stored receipt. It does reuse its own preflight decision for cacheTtlMs (1 hour by default), which no vector covers."
+      },
+      "evidence": {
+        "receipt": { "decision": "allow", "issued_seconds_ago": 691200, "recheck_after_seconds_ago": 86400 },
+        "preflight": { "status": 503, "body": { "detail": "unavailable" } },
+        "merchant_card": { "status": 503, "body": { "detail": "unavailable" } }
+      },
+      "policy": { "max_receipt_age_seconds": 604800 },
+      "expect": { "pays": false, "decision": "unavailable", "reason_code": "INTEL_UNAVAILABLE" }
+    },
+    {
+      "id": "outage_preflight",
+      "covers": "outage",
+      "description": "The preflight answers 503.",
+      "applies_to": ["x402-gate", "plugin-trustgate", "twzrd-preflight"],
+      "evidence": {
+        "preflight": { "status": 503, "body": { "detail": "unavailable" } },
+        "merchant_card": { "status": 200, "body": { "wash_flagged": false, "confidence": "full", "ring_evaluated": true } }
+      },
+      "policy": {},
+      "expect": { "pays": false, "decision": "unavailable", "reason_code": "INTEL_UNAVAILABLE" }
+    },
+    {
+      "id": "outage_preflight_unreachable",
+      "covers": "outage",
+      "description": "The preflight request fails at the network: connection refused, no HTTP status.",
+      "applies_to": ["x402-gate", "plugin-trustgate", "twzrd-preflight"],
+      "evidence": {
+        "preflight": { "error": "ECONNREFUSED" },
+        "merchant_card": { "status": 200, "body": { "wash_flagged": false, "confidence": "full", "ring_evaluated": true } }
+      },
+      "policy": {},
+      "expect": { "pays": false, "decision": "unavailable", "reason_code": "INTEL_UNAVAILABLE" }
+    },
+    {
+      "id": "outage_merchant_card",
+      "covers": "outage",
+      "description": "Intel allows, but the merchant card answers 503, so the wash check cannot run.",
+      "applies_to": ["x402-gate", "plugin-trustgate", "twzrd-preflight"],
+      "evidence": {
+        "preflight": { "status": 200, "body": { "readiness_card": { "decision": "allow", "trust_score": 80, "score": 0.8, "can_spend": true, "recommended_cap_usdc": 1 } } },
+        "merchant_card": { "status": 503, "body": { "detail": "unavailable" } }
+      },
+      "policy": {},
+      "expect": { "pays": false, "decision": "unavailable", "reason_code": "INTEL_UNAVAILABLE" }
+    },
+    {
+      "id": "outage_fail_open_opted_in",
+      "covers": "outage",
+      "description": "The preflight answers 503 and the buyer turned fail_open on explicitly: the payment goes through, and the record still says no verdict was produced.",
+      "applies_to": ["x402-gate", "plugin-trustgate", "twzrd-preflight"],
+      "evidence": {
+        "preflight": { "status": 503, "body": { "detail": "unavailable" } },
+        "merchant_card": { "status": 200, "body": { "wash_flagged": false, "confidence": "full", "ring_evaluated": true } }
+      },
+      "policy": { "fail_open": true },
+      "expect": { "pays": true, "decision": "unavailable", "reason_code": "INTEL_UNAVAILABLE" }
+    }
+  ]
+}

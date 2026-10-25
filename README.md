@@ -271,6 +271,14 @@ Offline, the stub answers only for the two sellers the harness records (one `blo
 `Test` workflow runs it offline on Node 20, 22 and 24; the openclaw contract checks (T10c,
 T10e) run on 24 only, because openclaw needs Node >=24.16.
 
+`npm test` also runs `test/guard-vectors.test.mjs`: the shared guard vectors from
+[twzrd-trust](https://github.com/twzrd-sol/twzrd-trust/tree/main/docs/vectors), vendored in
+`test/fixtures` with the commit and sha256 they were copied from, played through the
+`before_tool_call` hook. The hook agrees on 8 of 17. On the other 9 it lets the payment run
+where the vectors refuse, or records a different reason. Each is pinned in the test with the
+outcome it reaches and why: it has no cap rule, no unevaluated rule and no wash-coverage rule,
+and it reads a preflight answer with no card as `warn`.
+
 Verified against OpenClaw **2026.7.1-2** (`openclaw.build.openclawVersion` + T10c).
 Gate pin: `twzrd-x402-gate@0.12.5`. Refuse-bin spawn without `@x402/*` peers is a
 missing-peer fail (exit 2), not a live dogfood EXTERNAL_RUN.
