@@ -6,7 +6,9 @@
 > surface is the gate itself (`twzrd-x402-gate` in `twzrd-sol/twzrd-trust`). The plugin was
 > frozen on 2026-10-23 after a 90-day usage review: every call it made to intel fell on its own
 > release and test days, with no external host running it. 0.5.0 is an operator-approved
-> release onto gate 0.13.0, so both seams refuse what that gate refuses.
+> release onto gate 0.13.0. The 402 wrap is the gate's own wrapper with its defaults. The hook
+> copies the gate's readiness and wash rules, with the differences listed under
+> [Gate rules](#gate-rules), and agrees with the gate on all 17 shared guard vectors.
 
 OpenClaw plugin **0.5.0**: install = intercept. Pin **`twzrd-x402-gate@0.13.0`**
 (exact; same line as other TWZRD seats).
