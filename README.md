@@ -230,9 +230,10 @@ Built-in coverage: AgentCash MCP tools + exec/curl x402 payments. For other paym
   - an exec command sending a signed payment header to a URL, with no seller wallet and no
     observed 402 for its origin. The header was signed before the hook ran, so the refusal
     stops the payment being sent, not the signing, and carries no refuse transcript;
-  - a tool named, by whole word, as a payment tool (`agentcash`, `x402`, `pay`, `payment`)
-    that carries a URL outside the `origin`/`url` params. The tool does not run, so neither
-    does its signer.
+  - a payment-named tool that carries a URL outside the `origin`/`url` params. Payment-named
+    means `agentcash` or `x402` anywhere in the name, or `pay`, `pays`, `payment` or
+    `payments` as a whole word (not `payload` or `taxpayer`). The tool does not run, so
+    neither does its signer.
 
   A refusal applies whatever `failMode` says (it is not an outage), and `shadow` logs it as a
   would-block. A read-only tool in a payment-named family, such as one whose `resource_url`
@@ -240,7 +241,8 @@ Built-in coverage: AgentCash MCP tools + exec/curl x402 payments. For other paym
 - **NOT covered**: ClawRouter proxy settlements (sign inside localhost:8402, invisible to tool
   hooks — needs ClawRouter's upstream `onBeforePayment` hook). An exec that pays inside another
   CLI, with no payment header on its command line, is not seen. A payee named inside the
-  header payload is not decoded.
+  header payload is not decoded. A signed-header command checked against a cached `payTo`
+  carries no price, so `maxPriceUsdc` does not apply to it.
 
 ## Gate rules
 

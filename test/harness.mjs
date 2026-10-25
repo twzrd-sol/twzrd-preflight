@@ -992,6 +992,7 @@ for (const [label, command] of [
   ["v1 X-PAYMENT", `curl -s ${PAID_URL} -H 'X-PAYMENT: ${SIGNED}'`],
   ["v2 PAYMENT-SIGNATURE", `curl -s -H "PAYMENT-SIGNATURE: ${SIGNED}" ${PAID_URL}`],
   ["wget --header=", `wget -qO- --header='X-PAYMENT: ${SIGNED}' ${PAID_URL}`],
+  ["-H with no space", `curl -s ${PAID_URL} -H"X-PAYMENT: ${SIGNED}"`],
 ]) {
   await t(`T32 exec sending a signed payment (${label}) with no readable payee → block, no intel`, async () => {
     const counter = { intel: 0 };

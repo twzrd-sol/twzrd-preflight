@@ -58,16 +58,17 @@ const RE = {
   url: /https?:\/\/[^\s"'<>]+/g,
   // curl/wget sending an x402 payment header (not X-PAYMENT-RESPONSE): the header is the
   // signed payment, so the command pays whoever that payment names.
-  paymentHeader: /(?:^|\s)(?:-H|--header)(?:\s+|=)['"]?\s*(?:payment-signature|x-payment)\s*:/i,
+  paymentHeader: /(?:^|\s)(?:-H|--header)(?:\s+|=)?['"]?\s*(?:payment-signature|x-payment)\s*:/i,
 };
 const EXEC_TOOLS = new Set(["exec", "bash", "shell", "system.run", "run"]);
 const PAYMENTISH_TOOL = /agentcash|x402|pay/i;
 const PAYMENT_WORDS = new Set(["pay", "pays", "payment", "payments"]);
 
 /**
- * Payment-named by whole word: agentcash_fetch, x402_pay, make_payment, fetchWithPayment.
- * Not inspect_payload or taxpayer_lookup, which PAYMENTISH_TOOL also matches. Only the
- * refusal of a call with no readable payee uses this narrower test.
+ * Payment-named: agentcash or x402 anywhere in the name, or pay, pays, payment or payments as
+ * a whole word (agentcash_fetch, x402fetch, make_payment, fetchWithPayment). Not
+ * inspect_payload or taxpayer_lookup, which PAYMENTISH_TOOL also matches. Only the refusal of
+ * a call with no readable payee uses this narrower test.
  */
 function paymentNamed(toolName) {
   const name = String(toolName ?? "");
@@ -212,7 +213,7 @@ export function createGate(rawCfg = {}, logger = console) {
    * not payment-shaped. Two shapes count:
    *   - an exec command sending a signed x402 payment header to a URL. It was signed before
    *     this hook ran, so refusing it stops the payment being sent, not the signing;
-   *   - a whole-word payment-named tool that carries a URL in a param other than
+   *   - a payment-named tool (paymentNamed) that carries a URL in a param other than
    *     origin/url. The tool has not run, so its signer has not either.
    */
   function unparsedPayment(toolName, params) {

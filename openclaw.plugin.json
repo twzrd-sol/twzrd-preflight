@@ -27,7 +27,7 @@
       "refuseUnparsedPayments": {
         "type": "boolean",
         "default": true,
-        "description": "Refuse a payment-shaped tool call whose payee cannot be read: an exec curl/wget sending a signed PAYMENT-SIGNATURE or X-PAYMENT header with no seller wallet and no observed 402 payTo for its origin, or a payment-named tool whose URL is not in an origin or url param. Opt out with false."
+        "description": "Refuse a payment-shaped tool call whose payee cannot be read: an exec curl/wget sending a signed PAYMENT-SIGNATURE or X-PAYMENT header with no seller wallet and no observed 402 payTo for its origin, or a payment-named tool (agentcash or x402 in the name, or pay/payment as a whole word) whose URL is not in an origin or url param. Opt out with false."
       },
       "timeoutMs": {
         "type": "number",
