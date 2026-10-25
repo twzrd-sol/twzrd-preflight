@@ -1,6 +1,14 @@
 /**
  * Phase 1 harness: exercises the gate hooks directly (no OpenClaw gateway needed).
- * Calls the LIVE free preflight API (no auth, no payments). Run: npm test
+ *
+ * Offline by default (npm test): intel is a stub at globalThis.fetch that answers for the
+ * two recorded sellers below and nothing else. Loopback passes through, because T7a, T7b
+ * and T15 point at 127.0.0.1:9 to get a refused connection. Any other request fails the
+ * run in TX. T19 spawns the gate's refuse binary, which exits at its missing-peer check
+ * before it fetches anything.
+ *
+ * TWZRD_PREFLIGHT_LIVE=1 npm test calls the LIVE free preflight API instead (no auth, no
+ * payments), so the recorded answers can be re-checked against intel.
  */
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
@@ -45,6 +53,39 @@ const BLOCK_WALLET = "6EF8rrecthR5Dkzon8Nwu78hRvfCKubJ14M5uBEwF6P";
 // Live-verified today: unknown-but-valid pubkey returns decision=warn (score 45).
 const UNKNOWN_WALLET = "GFpLvocNdEjnSsLH3VJQL6wGcjGxTbUBrj6fqN3Qe1Gs";
 
+const LIVE = process.env.TWZRD_PREFLIGHT_LIVE === "1";
+const INTEL = "https://intel.twzrd.xyz";
+/** What live intel answers for the two recorded sellers; the offline stub serves these. */
+const RECORDED_CARDS = {
+  [BLOCK_WALLET]: { decision: "block", trust_score: 31, can_spend: false },
+  [UNKNOWN_WALLET]: { decision: "warn", trust_score: 45, can_spend: false },
+};
+/** A merchant card with full wash coverage and no finding. */
+const CLEAN_MERCHANT_CARD = { wash_flagged: false, wash_confidence: "full", ring_evaluated: true, wash_stale: false };
+const jsonResponse = (body, status = 200) =>
+  new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+/** Requests the offline stub had no recorded answer for; TX fails on any. */
+const unrecorded = [];
+
+if (!LIVE) {
+  const realFetch = globalThis.fetch.bind(globalThis);
+  // Installed before any test runs. createGate and the gate read globalThis.fetch when
+  // they are called, not when they are imported, so every default-fetch path sees this.
+  globalThis.fetch = async (input, init) => {
+    const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
+    if (["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) return realFetch(input, init);
+    const method = String(init?.method ?? "GET").toUpperCase();
+    if (url.origin === INTEL && method === "POST" && url.pathname === "/v1/intel/preflight") {
+      const seller = JSON.parse(init?.body ?? "{}").seller_wallet;
+      if (RECORDED_CARDS[seller]) return jsonResponse({ readiness_card: { ...RECORDED_CARDS[seller], seller_wallet: seller } });
+    }
+    const card = url.origin === INTEL && method === "GET" && /^\/v1\/intel\/merchant_card\/([^/]+)$/.exec(url.pathname);
+    if (card && RECORDED_CARDS[decodeURIComponent(card[1])]) return jsonResponse(CLEAN_MERCHANT_CARD);
+    unrecorded.push(`${method} ${url.href}`);
+    throw new TypeError(`offline harness: no recorded answer for ${method} ${url.href}`);
+  };
+}
+
 const curlCmd = (wallet, resource, price) =>
   `curl -s -X POST https://api.example-x402.dev/v1/thing -H 'content-type: application/json' ` +
   `-d '{"resource_name":"${resource}","seller_wallet":"${wallet}","price_usdc":${price},"agent_intent":"buy"}'`;
@@ -65,7 +106,7 @@ const assert = (cond, msg) => {
   if (!cond) throw new Error(msg);
 };
 
-console.log("twzrd-preflight Phase 1 harness (live free API)\n");
+console.log(`twzrd-preflight Phase 1 harness (${LIVE ? "live free API" : "offline, intel stubbed"})\n`);
 
 await t("T1 non-payment tool is ignored (no API call)", async () => {
   const g = createGate({ mode: "enforce" }, QUIET);
@@ -929,6 +970,14 @@ await t("T31 TWZRD_REFUSE_WASH_UNKNOWN=1 reaches the 402 wrap (partial refused, 
     const r = await g.beforeToolCall({ toolName: "exec", params: { command: curlCmd(CLEAN_PAYTO, "Clean thing", 0.01) } });
     assert(r === undefined, `tool hook must still allow partial coverage, got ${JSON.stringify(r)}`);
   });
+});
+
+await t("TX offline: every intel request was one the stub has a recorded answer for", async () => {
+  if (LIVE) {
+    console.log("  SKIP TX (live run)");
+    return;
+  }
+  assert(unrecorded.length === 0, `unrecorded requests: ${unrecorded.join(", ")}`);
 });
 
 console.log(`\n${pass} passed, ${fail} failed`);

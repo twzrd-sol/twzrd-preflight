@@ -241,8 +241,14 @@ or full params are forwarded. The endpoint is configurable.
 ## Test
 
 ```bash
-npm test    # 40 passed (live FREE preflight + injected 402 / 0.12.5 API smoke + conflict, card-outage, v2 header, every-offer, asset cases; no auth, no payments)
+npm test                          # offline: intel stubbed at fetch, no network
+TWZRD_PREFLIGHT_LIVE=1 npm test   # the same tests against the LIVE free preflight (no auth, no payments)
 ```
+
+Offline, the stub answers only for the two sellers the harness records (one `block`, one
+`warn`, each with a clean merchant card), and the run fails on any other intel request. The
+`Test` workflow runs it offline on Node 20, 22 and 24; the openclaw contract checks (T10c,
+T10e) run on 24 only, because openclaw needs Node >=24.16.
 
 Verified against OpenClaw **2026.7.1-2** (`openclaw.build.openclawVersion` + T10c).
 Gate pin: `twzrd-x402-gate@0.12.5`. Refuse-bin spawn without `@x402/*` peers is a
