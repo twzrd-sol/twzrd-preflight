@@ -6,21 +6,17 @@
 // decision and reason_code. The fixture is a vendored copy, so SOURCE records where it came
 // from, and the first test fails if the fixture changes without SOURCE changing with it.
 //
-// The hook gates a tool call, not a signer: pays means the hook let the call run. The call is
-// an exec curl that names the vector's seller wallet and price, the shape the hook reads best.
-// Intel is a stub at cfg.fetch serving the vector's preflight and merchant card; any other
-// request fails the vector, and global fetch throws for the whole run.
+// The hook gates a tool call, not a signer: pays means the hook let the call run. Each vector is
+// played twice: as an exec curl that names the seller wallet and price, and as a payment-named
+// tool (x402_pay) whose execute is a spy the host calls only when the hook lets it run. Intel is
+// a stub at cfg.fetch serving the vector's preflight and merchant card; any other request fails
+// the vector, and global fetch throws for the whole run.
 //
-// The hook has two of the vector policy's rules (fail_open, refuse_wash_flagged). It reaches a
-// different outcome than the vectors on several, and KNOWN_DIVERGENCE pins each one with the
-// outcome it reaches today, the way twzrd-trust pins plugin-trustgate. A new divergence fails,
-// one that changes shape fails, and one that goes away fails until it is removed from the list.
-//
-// The hook's outcome maps onto payment_decision.v1 as: refused on an intel or merchant card
-// outage -> unavailable / INTEL_UNAVAILABLE; refused on a wash finding -> block / WASH_FLAGGED;
-// refused on decision block -> block / INTEL_BLOCK; let through after an outage (failMode
-// open) -> unavailable / INTEL_UNAVAILABLE; let through on warn -> warn / INTEL_WARN; else
-// allow / ALLOW.
+// The decision and reason_code are the ones the hook reports to cfg.onDecision, once per call.
+// KNOWN_DIVERGENCE pins a vector the hook disagrees with, with the outcome it reaches, the way
+// twzrd-trust pins plugin-trustgate. A new divergence fails, one that changes shape fails, and
+// one that goes away fails until it is removed from the list. It is empty: the hook copies the
+// gate 0.13.0 rules every applicable vector exercises.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
@@ -46,29 +42,15 @@ const QUIET = { info() {}, warn() {} };
 const POLICY_CONFIG = {
   fail_open: (v) => ({ failMode: v ? "open" : "closed" }),
   refuse_wash_flagged: (v) => ({ refuseWashFlagged: v }),
+  refuse_unevaluated: (v) => ({ refuseUnevaluated: v }),
+  refuse_uncapped_warn: (v) => ({ refuseUncappedWarn: v }),
+  refuse_wash_unknown: (v) => ({ refuseWashUnknown: v }),
 };
 /** Vector policy keys the hook has no rule for. A key in neither list fails the run. */
-const NO_EQUIVALENT = [
-  "min_trust_score",
-  "gate_on_can_spend",
-  "refuse_unevaluated",
-  "refuse_uncapped_warn",
-  "refuse_wash_unknown",
-  "wash_max_usdc",
-];
+const NO_EQUIVALENT = ["min_trust_score", "gate_on_can_spend", "wash_max_usdc"];
 
 /** What the hook does on each vector it disagrees with, and why. */
-const KNOWN_DIVERGENCE = {
-  warn_over_cap: { pays: true, decision: "warn", reason_code: "INTEL_WARN", why: "no cap rule: a warn is paid at any price (maxPriceUsdc is a flat local ceiling, unset here)" },
-  warn_no_cap: { pays: true, decision: "warn", reason_code: "INTEL_WARN", why: "no cap rule: a warn with no recommended cap is paid" },
-  missing_readiness_card: { pays: true, decision: "warn", reason_code: "INTEL_WARN", why: "a preflight answer with no readiness_card reads as warn" },
-  missing_merchant_card: { pays: true, decision: "allow", reason_code: "ALLOW", why: "a merchant card that answers 404 is no wash signal, and the hook has no wash-coverage rule" },
-  unevaluated: { pays: true, decision: "warn", reason_code: "INTEL_WARN", why: "no unevaluated rule: null_reason and score null are not read, and a warn is paid" },
-  unevaluated_within_cap_opted_in: { pays: true, decision: "warn", reason_code: "INTEL_WARN", why: "pays, as expected, but cannot tell an unknown counterparty from intel's warn" },
-  wash_unknown: { pays: true, decision: "allow", reason_code: "ALLOW", why: "no wash-coverage rule: wash_flagged null is no signal" },
-  wash_partial: { pays: true, decision: "allow", reason_code: "ALLOW", why: "no wash-coverage rule: partial confidence is not read" },
-  stale_wash_evidence: { pays: true, decision: "allow", reason_code: "ALLOW", why: "no wash-coverage rule: wash_stale is not read" },
-};
+const KNOWN_DIVERGENCE = {};
 
 function gateConfig(policy) {
   const cfg = {};
@@ -87,7 +69,23 @@ function serve(evidence) {
   });
 }
 
-async function runVector(v) {
+/** The two ways a vector is played: an exec curl, and a payment-named tool. */
+const CALLS = {
+  exec: (v, payTo) => ({
+    toolName: "exec",
+    params: {
+      command:
+        `curl -s -X POST https://seller.vectors.invalid/x402/item -H 'content-type: application/json' ` +
+        `-d '{"resource_name":"vector ${v.id}","seller_wallet":"${payTo}","price_usdc":${FILE.challenge.price_usdc}}'`,
+    },
+  }),
+  x402_pay: (v, payTo) => ({
+    toolName: "x402_pay",
+    params: { seller_wallet: payTo, price_usdc: FILE.challenge.price_usdc, resource_name: `vector ${v.id}` },
+  }),
+};
+
+async function runVector(v, call) {
   const payTo = FILE.challenge.pay_to;
   const unexpected = [];
   const sellers = [];
@@ -104,35 +102,27 @@ async function runVector(v) {
     unexpected.push(`${method} ${url}`);
     throw new TypeError(`vector runner: unexpected intel request ${method} ${url}`);
   };
+  const decisions = [];
   const gate = createGate(
-    { mode: "enforce", endpoint: INTEL, fetch, timeoutMs: 2000, ...gateConfig({ ...FILE.policy_baseline, ...v.policy }) },
+    {
+      mode: "enforce",
+      endpoint: INTEL,
+      fetch,
+      timeoutMs: 2000,
+      onDecision: (d) => decisions.push(d),
+      ...gateConfig({ ...FILE.policy_baseline, ...v.policy }),
+    },
     QUIET,
   );
-  const command =
-    `curl -s -X POST https://seller.vectors.invalid/x402/item -H 'content-type: application/json' ` +
-    `-d '{"resource_name":"vector ${v.id}","seller_wallet":"${payTo}","price_usdc":${FILE.challenge.price_usdc}}'`;
-  const r = await gate.beforeToolCall({ toolName: "exec", params: { command } });
-  let observed;
-  if (r?.block) {
-    const reason = r.refuse?.twzrd_reason ?? "";
-    const [decision, reason_code] =
-      reason === "twzrd_fail_closed" || reason === "twzrd_card_unreachable"
-        ? ["unavailable", "INTEL_UNAVAILABLE"]
-        : reason.startsWith("twzrd_wash_flagged")
-          ? ["block", "WASH_FLAGGED"]
-          : ["block", "INTEL_BLOCK"];
-    observed = { pays: false, decision, reason_code };
-  } else {
-    const card = gate._caches.decisionCache.get(payTo)?.decision;
-    const [decision, reason_code] =
-      gate.stats.apiFailures > 0
-        ? ["unavailable", "INTEL_UNAVAILABLE"]
-        : card === "warn"
-          ? ["warn", "INTEL_WARN"]
-          : ["allow", "ALLOW"];
-    observed = { pays: true, decision, reason_code };
-  }
-  return { observed, unexpected, sellers };
+  // A minimal host: the tool runs (its execute, and so its signer) only when the hook lets it.
+  const execute = { calls: 0 };
+  const event = CALLS[call](v, payTo);
+  const r = await gate.beforeToolCall(event);
+  if (!r?.block) execute.calls += 1;
+  const pays = !r?.block;
+  const d = decisions[0];
+  const observed = { pays, decision: d?.decision, reason_code: d?.reason_code };
+  return { observed, decisions, r, execute, unexpected, sellers };
 }
 
 const vectors = FILE.vectors.filter((v) => v.applies_to.includes(GUARD));
@@ -153,32 +143,46 @@ test("guard vectors: the vendored fixture is the recorded copy, and covers this 
 });
 
 for (const v of vectors) {
-  test(`guard vector ${v.id} (${v.covers}): ${GUARD}`, async (t) => {
-    const at = `[vector ${v.id}] ${GUARD}`;
-    const realFetch = globalThis.fetch;
-    globalThis.fetch = async (input) => {
-      throw new TypeError(`vector runner: global fetch is not allowed (${String(input?.url ?? input)})`);
-    };
-    let run;
-    try {
-      run = await runVector(v);
-    } finally {
-      globalThis.fetch = realFetch;
-    }
-    const { observed, unexpected, sellers } = run;
-    assert.deepEqual(unexpected, [], `${at}: fetched something the vector does not serve`);
-    assert.ok(sellers.every((s) => s === FILE.challenge.pay_to), `${at}: preflight asked about ${JSON.stringify(sellers)}`);
-    const expected = { pays: v.expect.pays, decision: v.expect.decision, reason_code: v.expect.reason_code };
-    const known = KNOWN_DIVERGENCE[v.id];
-    if (!known) {
-      assert.deepEqual(observed, expected, `${at}: reached ${JSON.stringify(observed)}, expected ${JSON.stringify(expected)}`);
-      return;
-    }
-    const { why, ...pinned } = known;
-    assert.notDeepEqual(observed, expected, `${at}: now agrees with the vector; remove it from KNOWN_DIVERGENCE`);
-    assert.deepEqual(observed, pinned, `${at}: diverges differently than recorded (${why})`);
-    t.diagnostic(`known divergence: ${why}`);
-  });
+  for (const call of Object.keys(CALLS)) {
+    test(`guard vector ${v.id} (${v.covers}): ${GUARD} via ${call}`, async (t) => {
+      const at = `[vector ${v.id}] ${GUARD} via ${call}`;
+      const realFetch = globalThis.fetch;
+      globalThis.fetch = async (input) => {
+        throw new TypeError(`vector runner: global fetch is not allowed (${String(input?.url ?? input)})`);
+      };
+      let run;
+      try {
+        run = await runVector(v, call);
+      } finally {
+        globalThis.fetch = realFetch;
+      }
+      const { observed, decisions, r, execute, unexpected, sellers } = run;
+      assert.deepEqual(unexpected, [], `${at}: fetched something the vector does not serve`);
+      assert.ok(sellers.every((s) => s === FILE.challenge.pay_to), `${at}: preflight asked about ${JSON.stringify(sellers)}`);
+      assert.equal(decisions.length, 1, `${at}: onDecision fired ${decisions.length} times, expected once`);
+      assert.equal(decisions[0].pays, observed.pays, `${at}: onDecision says pays=${decisions[0].pays}, the hook did the opposite`);
+      if (!observed.pays) {
+        // The refusal reached nothing that could sign.
+        assert.equal(execute.calls, 0, `${at}: refused, but the tool ran`);
+        assert.equal(r.refuse?.signer_invocation_count, 0, `${at}: refusal transcript must record signer_invocation_count 0`);
+        assert.equal(r.refuse?.usdc_spent, 0, `${at}: refusal transcript must record usdc_spent 0`);
+        assert.equal(r.refuse?.twzrd_reason, decisions[0].twzrd_reason, `${at}: transcript and onDecision disagree on the reason`);
+      } else {
+        assert.equal(execute.calls, 1, `${at}: let through, but the tool did not run`);
+      }
+      const expected = { pays: v.expect.pays, decision: v.expect.decision, reason_code: v.expect.reason_code };
+      const known = KNOWN_DIVERGENCE[v.id];
+      if (!known) {
+        assert.deepEqual(observed, expected, `${at}: reached ${JSON.stringify(observed)}, expected ${JSON.stringify(expected)}`);
+        t.diagnostic(`twzrd_reason ${decisions[0].twzrd_reason}`);
+        return;
+      }
+      const { why, ...pinned } = known;
+      assert.notDeepEqual(observed, expected, `${at}: now agrees with the vector; remove it from KNOWN_DIVERGENCE`);
+      assert.deepEqual(observed, pinned, `${at}: diverges differently than recorded (${why})`);
+      t.diagnostic(`known divergence: ${why}`);
+    });
+  }
 }
 
 test("guard vectors: twzrd-preflight tally", (t) => {

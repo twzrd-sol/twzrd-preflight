@@ -6,10 +6,13 @@
  *      Wash-flagged payTo throws before the caller can attach payment / sign.
  *   2) before_tool_call — payment-shaped tool matchers (MCP + exec/curl x402).
  *
- * Factory defaults: enforce, fail-closed, refuseWashFlagged on.
- * Shadow / fail-open / wash-off are opt-in.
+ * Factory defaults: enforce, fail-closed, refuseWashFlagged, refuseWashUnknown,
+ * refuseUncappedWarn and refuseUnevaluated on. Shadow / fail-open / each opt-out is opt-in.
  *
- * Gate rule for tool calls: decision === "block" OR wash_flagged (default).
+ * Gate rules for tool calls, copied from twzrd-x402-gate 0.13.0 (this plugin pins 0.12.5):
+ * a card that is missing or says block refuses; a warn is paid only under its own
+ * recommended_cap_usdc at a known price; a seller intel never evaluated refuses; a
+ * wash_flagged payTo refuses; a merchant card without full, fresh wash coverage refuses.
  * NEVER gate on can_spend alone (free tier defaults can_spend:false for unknown).
  * A payment-shaped call whose payee cannot be read is refused (refuseUnparsedPayments).
  *
@@ -38,6 +41,9 @@ export const DEFAULTS = {
   mode: "enforce", // off | shadow | enforce — shadow is opt-in
   failMode: "closed", // closed = fail-closed; open is opt-in
   refuseWashFlagged: true, // wash_flagged payTo refuses; opt out with false
+  refuseWashUnknown: true, // merchant card without full, fresh wash coverage refuses; opt out with false
+  refuseUncappedWarn: true, // warn with no recommended_cap_usdc or no known price refuses; opt out with false
+  refuseUnevaluated: true, // seller intel never evaluated refuses; false pays it up to the card's cap
   refuseUnparsedPayments: true, // payment-shaped call with no readable payee refuses; opt out with false
   timeoutMs: 5000,
   maxPriceUsdc: null,
@@ -91,6 +97,155 @@ function originOf(u) {
   } catch {
     return null;
   }
+}
+
+function finiteNumber(v) {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
+/**
+ * True when intel says it did not evaluate this seller: a null_reason, or score present and
+ * null. Copy of twzrd-x402-gate 0.13.0 isUnevaluatedCard (src/policy.ts).
+ */
+function isUnevaluatedCard(card) {
+  if (typeof card.null_reason === "string" && card.null_reason.trim() !== "") return true;
+  return "score" in card && card.score === null;
+}
+
+/**
+ * The readiness card rules of twzrd-x402-gate 0.13.0 evaluateReadinessCard (src/policy.ts),
+ * copied because this plugin pins 0.12.5, with the gate's reason strings. Pure: no network.
+ *
+ * Differences from the gate. This plugin has no preflightMinScore or gateOnCanSpend, so a low
+ * trust_score or can_spend false alone never refuses. A card with no decision is refused by
+ * name, twzrd_decision_undefined, where the gate reads it as warn and refuses it on score. A
+ * decision outside allow, warn and block is refused, twzrd_decision_<decision>, where the gate
+ * approves it.
+ *
+ * Returns { approved, verdict, reason, unevaluated, recommendedCapUsdc }. A price above an
+ * approved card's cap is checked after this, by overRecommendedCap, as in the gate.
+ */
+export function evaluateReadinessCard(card, { priceUsdc = null, refuseUncappedWarn = true, refuseUnevaluated = true } = {}) {
+  const c = card && typeof card === "object" ? card : {};
+  const decision = c.decision;
+  const cap = finiteNumber(c.recommended_cap_usdc) !== null && c.recommended_cap_usdc >= 0 ? c.recommended_cap_usdc : null;
+  const price = finiteNumber(priceUsdc);
+  if (decision === "block") return { approved: false, verdict: "block", reason: "twzrd_decision_block", unevaluated: false };
+  if (isUnevaluatedCard(c)) {
+    const nullReason = c.null_reason ?? "score_null";
+    const refuse = (reason) => ({ approved: false, verdict: "unknown", reason, unevaluated: true, recommendedCapUsdc: cap });
+    if (refuseUnevaluated !== false) return refuse(`twzrd_unevaluated_subject_${nullReason}`);
+    if (decision !== "allow" && decision !== "warn") return refuse(`twzrd_unevaluated_subject_${nullReason}`);
+    if (cap === null) return refuse(`twzrd_unevaluated_no_cap_${nullReason}`);
+    if (price === null) return refuse(`twzrd_unevaluated_unknown_price_${nullReason}`);
+    if (price > cap) return refuse(`twzrd_unevaluated_over_cap_${price}_gt_${cap}`);
+    return {
+      approved: true,
+      verdict: "warn",
+      reason: `twzrd_unevaluated_within_cap_${price}_le_${cap}`,
+      unevaluated: true,
+      recommendedCapUsdc: cap,
+    };
+  }
+  if (decision !== "allow" && decision !== "warn") {
+    return { approved: false, verdict: "block", reason: `twzrd_decision_${decision}`, unevaluated: false };
+  }
+  if (decision === "warn" && refuseUncappedWarn !== false) {
+    if (cap === null) return { approved: false, verdict: "block", reason: "twzrd_warn_no_cap", unevaluated: false };
+    if (price === null) return { approved: false, verdict: "block", reason: "twzrd_warn_unknown_price", unevaluated: false };
+  }
+  return {
+    approved: true,
+    verdict: decision,
+    reason: decision === "warn" ? "twzrd_warn_allowed" : "twzrd_allow",
+    unevaluated: false,
+    recommendedCapUsdc: cap,
+  };
+}
+
+/** The gate's over-cap refusal (twzrdApprovePayment): an approved card, priced above its cap. */
+export function overRecommendedCap(evaluation, priceUsdc) {
+  const price = finiteNumber(priceUsdc);
+  const cap = evaluation?.recommendedCapUsdc;
+  if (!evaluation?.approved || cap == null || price === null || price <= cap) return null;
+  return `twzrd_over_recommended_cap_${price}_gt_${cap}`;
+}
+
+/**
+ * True only for full, fresh wash coverage: wash_flagged is a boolean, wash_stale is not true,
+ * ring_evaluated is not false, and the confidence (wash_confidence, else confidence) is "full".
+ * A missing card is not coverage. Copy of twzrd-x402-gate 0.13.0 washEvidenceFromCard plus
+ * isWashCoverageAdequate (src/wash-default.ts), which also refuses every confidence but full.
+ */
+export function isWashCoverageAdequate(mcard) {
+  if (!mcard || typeof mcard !== "object") return false;
+  if (typeof mcard.wash_flagged !== "boolean") return false;
+  if (mcard.wash_stale === true) return false;
+  const ring =
+    typeof mcard.ring_evaluated === "boolean" ? mcard.ring_evaluated : mcard.circular_flow_signals?.ring_evaluated;
+  if (ring === false) return false;
+  const raw =
+    typeof mcard.wash_confidence === "string" && mcard.wash_confidence.trim()
+      ? mcard.wash_confidence
+      : typeof mcard.confidence === "string" && mcard.confidence.trim()
+        ? mcard.confidence
+        : "";
+  return raw.trim().toLowerCase() === "full";
+}
+
+/**
+ * The twzrd.payment_decision.v1 decision and reason_code for one outcome, in the order
+ * twzrd-x402-gate 0.13.0 decisionFromApproval (src/payment-decision.ts) applies them.
+ */
+export function paymentDecisionFor({ approved, reason, verdict, outage = false, washFlagged = false, unevaluated = false }) {
+  const r = String(reason ?? "");
+  if (/^twzrd_fail_(?:closed|open)\b|^twzrd_card_unreachable/.test(r) || (approved && outage)) {
+    return { decision: "unavailable", reason_code: "INTEL_UNAVAILABLE" };
+  }
+  if (!approved && (washFlagged || /twzrd_wash_flagged/.test(r))) return { decision: "block", reason_code: "WASH_FLAGGED" };
+  if (unevaluated) {
+    if (approved) return { decision: "warn", reason_code: "UNKNOWN_UNDER_LIMIT" };
+    return { decision: "block", reason_code: /^twzrd_unevaluated_/.test(r) ? "UNKNOWN_ABOVE_LIMIT" : "INTEL_BLOCK" };
+  }
+  if (!approved) return { decision: "block", reason_code: "INTEL_BLOCK" };
+  if (verdict === "warn") return { decision: "warn", reason_code: "INTEL_WARN" };
+  return { decision: "allow", reason_code: "ALLOW" };
+}
+
+/** Why each refusal reason refused, and the config that lets the operator pay anyway. */
+function refusalCopy(reason, intent) {
+  const payee = intent.sellerWallet ?? intent.origin;
+  if (reason === "twzrd_warn_no_cap") {
+    return { why: `intel warned on ${payee} and gave no recommended spend cap`, optOut: "refuseUncappedWarn: false" };
+  }
+  if (reason === "twzrd_warn_unknown_price") {
+    return {
+      why: `intel warned on ${payee}, and this call names no price to hold to its recommended cap`,
+      optOut: "refuseUncappedWarn: false",
+    };
+  }
+  if (reason.startsWith("twzrd_over_recommended_cap_") || reason.startsWith("twzrd_unevaluated_over_cap_")) {
+    return { why: `the price is above intel's recommended cap for ${payee}`, optOut: "allowWallets" };
+  }
+  if (reason.startsWith("twzrd_unevaluated_subject_")) {
+    return {
+      why: `intel has never evaluated ${payee}`,
+      optOut: "refuseUnevaluated: false (which pays it up to the card's recommended cap)",
+    };
+  }
+  if (reason.startsWith("twzrd_unevaluated_")) {
+    return { why: `intel has never evaluated ${payee}, and its cap or this call's price is unknown`, optOut: "allowWallets" };
+  }
+  if (reason.startsWith("twzrd_wash_flagged")) {
+    return { why: `intel flags ${payee} for wash trading`, optOut: "refuseWashFlagged: false" };
+  }
+  if (reason === "twzrd_wash_unknown") {
+    return {
+      why: `the merchant card for ${payee} does not show full, fresh wash coverage`,
+      optOut: "refuseWashUnknown: false",
+    };
+  }
+  return { why: `intel returned no readiness decision this gate pays on for ${payee}`, optOut: "allowWallets" };
 }
 
 export function createGate(rawCfg = {}, logger = console) {
@@ -247,11 +402,15 @@ export function createGate(rawCfg = {}, logger = console) {
     };
   }
 
-  /** POST the free preflight. Returns "allow"|"warn"|"block", or null on failure. */
+  /**
+   * POST the free preflight. Returns the readiness card (an object, {} when intel sent none),
+   * or null on failure. The card is cached, not the decision: the outcome also depends on
+   * each call's price, so it is evaluated per call.
+   */
   async function preflight(intent, toolName) {
     const key = intent.sellerWallet ?? intent.origin;
     const cached = decisionCache.get(key);
-    if (fresh(cached)) return cached.decision;
+    if (fresh(cached)) return cached.card;
 
     const body = {
       seller_wallet: intent.sellerWallet ?? undefined,
@@ -275,10 +434,11 @@ export function createGate(rawCfg = {}, logger = console) {
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const json = await res.json();
-      const card = json.readiness_card ?? {};
-      const decision = card.decision ?? "warn";
-      decisionCache.set(key, { decision, ts: Date.now(), card });
-      return decision;
+      // As twzrd-x402-gate reads it: the readiness_card, else the body itself.
+      const raw = json?.readiness_card ?? json;
+      const card = raw && typeof raw === "object" ? raw : {};
+      decisionCache.set(key, { decision: card.decision, ts: Date.now(), card });
+      return card;
     } catch (err) {
       stats.apiFailures += 1;
       log.warn(`preflight unavailable (${err?.message ?? err})`);
@@ -297,6 +457,39 @@ export function createGate(rawCfg = {}, logger = console) {
       `Do not retry this payment as-is; the operator must allowlist this counterparty in the ` +
       `twzrd-preflight plugin config to proceed.`
     );
+  }
+
+  /** The blockReason for a refusal under one of the 0.13.0 rules: why, and its opt-out. */
+  function renderRuleReason(intent, reason) {
+    const { why, optOut } = refusalCopy(reason, intent);
+    return (
+      `TWZRD trust gate: payment to ${intent.sellerWallet ?? intent.origin} blocked (${reason}): ${why}. ` +
+      `Do not retry this payment as-is; the operator can set ${optOut} in the twzrd-preflight ` +
+      `plugin config to proceed.`
+    );
+  }
+
+  /**
+   * Hand one intel-evaluated outcome to cfg.onDecision as a twzrd.payment_decision.v1
+   * decision and reason_code. Telemetry: a callback that throws or rejects never changes
+   * the verdict and never reaches the host.
+   */
+  function reportDecision(intent, outcome, pays) {
+    if (typeof cfg.onDecision !== "function") return;
+    const { decision, reason_code } = paymentDecisionFor(outcome);
+    try {
+      Promise.resolve(
+        cfg.onDecision({
+          decision,
+          reason_code,
+          twzrd_reason: outcome.reason,
+          pays,
+          payee: intent.sellerWallet ?? intent.origin,
+        }),
+      ).catch(() => {});
+    } catch {
+      /* telemetry */
+    }
   }
 
   function verdict(reason, intent, toolName) {
@@ -369,23 +562,46 @@ export function createGate(rawCfg = {}, logger = console) {
       return;
     }
 
-    const decision = await preflight(intent, event.toolName);
-    if (decision === null) {
+    const key = intent.sellerWallet ?? intent.origin;
+    // A refusal blocks in enforce mode and is a would-block in shadow mode; either way the
+    // outcome is reported.
+    const settle = (outcome, blockReason) => {
+      const refused = !outcome.approved && verdict(outcome.reason, intent, event.toolName);
+      reportDecision(intent, outcome, !refused);
+      if (!refused) return undefined;
+      return { block: true, blockReason: blockReason(), refuse: refuseFor(intent, outcome.reason) };
+    };
+
+    const card = await preflight(intent, event.toolName);
+    if (card === null) {
       // API unreachable → failMode applies. Default closed.
       if (cfg.failMode === "closed") {
-        if (verdict("trust API unreachable (failMode=closed)", intent, event.toolName)) {
-          return {
-            block: true,
-            blockReason:
-              "TWZRD trust gate: trust API unreachable and failMode=closed — payment not evaluated.",
-            refuse: refuseFor(intent, "twzrd_fail_closed"),
-          };
-        }
+        return settle(
+          { approved: false, reason: "twzrd_fail_closed" },
+          () => "TWZRD trust gate: trust API unreachable and failMode=closed — payment not evaluated.",
+        );
       }
-      return; // fail-open opt-in
+      return settle({ approved: true, reason: "twzrd_fail_open", outage: true }); // fail-open opt-in
     }
 
+    // The readiness card, then its cap, then the merchant card: twzrd-x402-gate 0.13.0's order.
+    const evaluation = evaluateReadinessCard(card, {
+      priceUsdc: intent.priceUsdc,
+      refuseUncappedWarn: cfg.refuseUncappedWarn,
+      refuseUnevaluated: cfg.refuseUnevaluated,
+    });
+    const overCap = overRecommendedCap(evaluation, intent.priceUsdc);
+    if (overCap) {
+      return settle({ ...evaluation, approved: false, verdict: "block", reason: overCap }, () =>
+        renderRuleReason(intent, overCap),
+      );
+    }
+
+    // The merchant card is read while refuseWashFlagged is on, as in the gate; refuseWashUnknown
+    // applies only then. A payee known only by origin has no wallet to look up, and skips it.
     let washFlagged = null;
+    let coverageAdequate = null;
+    let cardUnreachable = false;
     if (cfg.refuseWashFlagged && intent.sellerWallet) {
       let mcard = null;
       try {
@@ -393,48 +609,53 @@ export function createGate(rawCfg = {}, logger = console) {
           intelBase: cfg.endpoint,
           fetch: cfg.fetch,
         });
+        // A card that answers 404 (null) is reachable, and is no coverage.
+        coverageAdequate = isWashCoverageAdequate(mcard);
       } catch (err) {
         // twzrd-x402-gate >= 0.9.12 throws MerchantCardUnreachableError on outage instead of
         // returning null, so "intel down" can no longer pass as "no wash signal".
         stats.apiFailures += 1;
         log.warn(`merchant_card unavailable (${err?.message ?? err})`);
-        if (cfg.failMode === "closed") {
-          if (verdict("merchant_card unreachable (failMode=closed)", intent, event.toolName)) {
-            return {
-              block: true,
-              blockReason:
-                "TWZRD trust gate: merchant_card (wash check) unreachable and failMode=closed — payment not evaluated.",
-              refuse: refuseFor(intent, "twzrd_card_unreachable"),
-            };
-          }
-          return;
+        // Only tightens: an outage never relabels a payment already refused.
+        if (cfg.failMode === "closed" && evaluation.approved) {
+          return settle(
+            { approved: false, reason: "twzrd_card_unreachable" },
+            () =>
+              "TWZRD trust gate: merchant_card (wash check) unreachable and failMode=closed — payment not evaluated.",
+          );
         }
-        // failMode=open (opt-in): wash status unknown, continue on the preflight decision.
+        // failMode=open (opt-in): wash status unknown, continue on the readiness card.
+        cardUnreachable = evaluation.approved;
       }
       if (mcard && typeof mcard.wash_flagged === "boolean") {
         washFlagged = mcard.wash_flagged;
       }
     }
     const wash = applyWashFlaggedPolicy({
-      approved: decision !== "block",
-      reason: decision === "block" ? "decision=block" : `decision=${decision}`,
+      approved: evaluation.approved,
+      reason: evaluation.reason,
       washFlagged,
       priceUsdc: intent.priceUsdc,
       refuseWashFlagged: cfg.refuseWashFlagged === true,
     });
+    let outcome = {
+      ...evaluation,
+      approved: wash.approved,
+      reason: wash.reason,
+      washFlagged: wash.washFlagged,
+      outage: cardUnreachable,
+    };
+    if (!wash.approved && wash.washFlagged === true) outcome.verdict = "block";
 
-    if (!wash.approved) {
-      const key = intent.sellerWallet ?? intent.origin;
-      const why = wash.washFlagged === true ? wash.reason : "decision=block";
-      if (verdict(why, intent, event.toolName)) {
-        return {
-          block: true,
-          blockReason: renderReason(intent, key),
-          refuse: refuseFor(intent, wash.reason),
-        };
-      }
+    if (outcome.approved && cfg.refuseWashUnknown && coverageAdequate === false) {
+      outcome = { ...outcome, approved: false, verdict: "block", reason: "twzrd_wash_unknown" };
     }
-    // allow | warn (and wash-off / wash unknown) → proceed.
+
+    // allow | warn within its cap, with full wash coverage (or wash-off) → proceed. A card that
+    // says block keeps the reason this plugin has always rendered.
+    return settle(outcome, () =>
+      outcome.reason === "twzrd_decision_block" ? renderReason(intent, key) : renderRuleReason(intent, outcome.reason),
+    );
   }
 
   /** Observe results for x402 402 envelopes; cache origin → payTo wallet. */

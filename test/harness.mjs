@@ -55,10 +55,13 @@ const UNKNOWN_WALLET = "GFpLvocNdEjnSsLH3VJQL6wGcjGxTbUBrj6fqN3Qe1Gs";
 
 const LIVE = process.env.TWZRD_PREFLIGHT_LIVE === "1";
 const INTEL = "https://intel.twzrd.xyz";
-/** What live intel answers for the two recorded sellers; the offline stub serves these. */
+/**
+ * What intel answers for the two recorded sellers; the offline stub serves these. The warn
+ * card carries a recommended cap, so a priced call under it pays (refuseUncappedWarn).
+ */
 const RECORDED_CARDS = {
   [BLOCK_WALLET]: { decision: "block", trust_score: 31, can_spend: false },
-  [UNKNOWN_WALLET]: { decision: "warn", trust_score: 45, can_spend: false },
+  [UNKNOWN_WALLET]: { decision: "warn", trust_score: 45, can_spend: false, recommended_cap_usdc: 0.05 },
 };
 /** A merchant card with full wash coverage and no finding. */
 const CLEAN_MERCHANT_CARD = { wash_flagged: false, wash_confidence: "full", ring_evaluated: true, wash_stale: false };
@@ -185,9 +188,9 @@ await t("T6b cache-derived wallet is sent to preflight (allow on warn)", async (
   });
   const r = await g.beforeToolCall({
     toolName: "agentcash_fetch",
-    params: { url: "https://api.example-x402.dev/v1/other" },
+    params: { url: "https://api.example-x402.dev/v1/other", price_usdc: 0.01 },
   });
-  assert(r === undefined, `warn must allow, got ${JSON.stringify(r)}`);
+  assert(r === undefined, `warn under its cap must allow, got ${JSON.stringify(r)}`);
   assert(
     g.lastRequest?.seller_wallet === UNKNOWN_WALLET,
     `preflight should receive the cached payTo wallet, got ${JSON.stringify(g.lastRequest)}`,
@@ -471,6 +474,10 @@ await t("T12 factory defaults are enforce + fail-closed + wash refuse", async ()
     pluginManifest.configSchema.properties.refuseUnparsedPayments?.default === true,
     "manifest refuseUnparsedPayments default",
   );
+  for (const key of ["refuseWashUnknown", "refuseUncappedWarn", "refuseUnevaluated"]) {
+    assert(DEFAULTS[key] === true, `${key} must default true`);
+    assert(pluginManifest.configSchema.properties[key]?.default === true, `manifest ${key} default`);
+  }
 });
 
 await t("T13 injected 402 wash-flagged payTo throws; no pay retry; refuse transcript", async () => {
@@ -725,7 +732,7 @@ function makeCardOutageFetch(counter) {
     if (String(init?.method ?? "GET").toUpperCase() === "POST" && url.includes("/preflight")) {
       counter.preflight += 1;
       return new Response(
-        JSON.stringify({ readiness_card: { decision: "warn", trust_score: 50, can_spend: true } }),
+        JSON.stringify({ readiness_card: { decision: "warn", trust_score: 50, can_spend: true, recommended_cap_usdc: 0.05 } }),
         { status: 200, headers: { "content-type": "application/json" } },
       );
     }
@@ -970,10 +977,14 @@ await t("T31 TWZRD_REFUSE_WASH_UNKNOWN=1 reaches the 402 wrap (partial refused, 
     const full = await runGated(header402([offer(CLEAN_PAYTO)]), counter, { fetch: makeCardIntel(counter, FULL_COVERAGE) });
     assert(full.err === null, `full coverage must pass, got ${full.err?.message}`);
     assert(full.resp?.status === 402, `402 returned to the payer, got ${full.resp?.status}`);
-    // The before_tool_call hook applies wash policy itself and does not read the gate's switch.
-    const g = createGate({ mode: "enforce", fetch: makeCardIntel({ intel: 0, preflightSellers: [] }, PARTIAL_COVERAGE) }, QUIET);
+    // The before_tool_call hook has its own refuseWashUnknown (on by default) and does not read
+    // the gate's switch: opted out, it still allows partial coverage with the env var set.
+    const g = createGate(
+      { mode: "enforce", refuseWashUnknown: false, fetch: makeCardIntel({ intel: 0, preflightSellers: [] }, PARTIAL_COVERAGE) },
+      QUIET,
+    );
     const r = await g.beforeToolCall({ toolName: "exec", params: { command: curlCmd(CLEAN_PAYTO, "Clean thing", 0.01) } });
-    assert(r === undefined, `tool hook must still allow partial coverage, got ${JSON.stringify(r)}`);
+    assert(r === undefined, `tool hook opted out must allow partial coverage, got ${JSON.stringify(r)}`);
   });
 });
 
@@ -1034,7 +1045,22 @@ await t("T33 exec sending a signed payment to an origin whose 402 was seen → g
     toolName: "exec",
     params: { command: `curl -s ${PAID_URL} -H 'X-PAYMENT: ${SIGNED}'` },
   });
-  assert(r2 === undefined, `cached warn payTo must pass, got ${JSON.stringify(r2)}`);
+  // The command names no price, so a warn cannot be held to its cap (refuseUncappedWarn).
+  assert(r2?.block === true && /twzrd_warn_unknown_price/.test(r2.blockReason), `cached warn payTo, no price: ${JSON.stringify(r2)}`);
+  assert(/refuseUncappedWarn: false/.test(r2.blockReason), `blockReason names the opt-out: ${r2.blockReason}`);
+  assert(r2.refuse === undefined, "signed command: no refuse transcript");
+
+  const g3 = createGate({ mode: "enforce", refuseUncappedWarn: false }, QUIET);
+  await g3.afterToolCall({
+    toolName: "exec",
+    params: { command: `curl -s ${PAID_URL}` },
+    result: `HTTP/1.1 402 {"accepts":[{"payTo":"${UNKNOWN_WALLET}","amount":"50000"}]}`,
+  });
+  const r3 = await g3.beforeToolCall({
+    toolName: "exec",
+    params: { command: `curl -s ${PAID_URL} -H 'X-PAYMENT: ${SIGNED}'` },
+  });
+  assert(r3 === undefined, `cached warn payTo with refuseUncappedWarn off must pass, got ${JSON.stringify(r3)}`);
 });
 
 await t("T34 payment-named tool with its URL outside origin/url → block before the tool (and its signer) runs", async () => {
@@ -1047,8 +1073,8 @@ await t("T34 payment-named tool with its URL outside origin/url → block before
   assert(r.refuse.signer_invocation_count === 0 && r.refuse.usdc_spent === 0, "no signer / no USDC");
   assert(counter.intel === 0, "no intel call");
   // A matcher naming the payee param turns the refusal into a normal check.
-  const g2 = createGate({ mode: "enforce", matchers: [{ tool: "x402_pay", walletParam: "payee" }] }, QUIET);
-  const r2 = await g2.beforeToolCall({ toolName: "x402_pay", params: { endpoint: PAID_URL, payee: UNKNOWN_WALLET } });
+  const g2 = createGate({ mode: "enforce", matchers: [{ tool: "x402_pay", walletParam: "payee", priceParam: "max_usdc" }] }, QUIET);
+  const r2 = await g2.beforeToolCall({ toolName: "x402_pay", params: { endpoint: PAID_URL, payee: UNKNOWN_WALLET, max_usdc: 0.05 } });
   assert(r2 === undefined && g2.stats.unparsed === 0, `matcher path must check, not refuse: ${JSON.stringify(r2)}`);
   assert(g2.lastRequest?.seller_wallet === UNKNOWN_WALLET, `matcher payee sent to preflight: ${JSON.stringify(g2.lastRequest)}`);
 });
@@ -1085,6 +1111,232 @@ await t("T36 shadow logs an unparsed payment as a would-block; refuseUnparsedPay
     assert(r2 === undefined, `opted out must not refuse ${call.toolName}, got ${JSON.stringify(r2)}`);
   }
   assert(off.stats.unparsed === 0 && off.stats.blocked === 0, `off ${JSON.stringify(off.stats)}`);
+});
+
+// ---- the gate 0.13.0 rules: caps, unevaluated sellers, missing cards, wash coverage ----
+const RULE_PAYTO = "RuLeRuLeRuLeRuLeRuLeRuLeRuLeRuLeRuLe11111";
+const WARN_CAPPED = { decision: "warn", trust_score: 50, score: 0.5, can_spend: true, recommended_cap_usdc: 0.05 };
+const UNEVALUATED = { decision: "warn", trust_score: 45, score: null, null_reason: "unknown_subject", can_spend: false, recommended_cap_usdc: 0.1 };
+/**
+ * Intel serving one preflight body and one merchant card (null answers 404) for any seller.
+ * A readiness card is wrapped as { readiness_card }; pass { body } to serve a raw body.
+ */
+function ruleIntel(readiness, merchantCard = FULL_COVERAGE) {
+  return async (input, init) => {
+    const url = typeof input === "string" ? input : input.url;
+    if (String(init?.method ?? "GET").toUpperCase() === "POST" && url.includes("/v1/intel/preflight")) {
+      return jsonResponse(readiness?.body ?? { readiness_card: readiness });
+    }
+    if (url.includes("/merchant_card/")) {
+      return merchantCard === null ? jsonResponse({ detail: "not found" }, 404) : jsonResponse(merchantCard);
+    }
+    throw new Error(`unexpected ${init?.method} ${url}`);
+  };
+}
+/** One exec curl to RULE_PAYTO at `price` (null names no price), with every onDecision call recorded. */
+async function ruleCall(readiness, { price = 0.01, merchantCard = FULL_COVERAGE, ...cfg } = {}) {
+  const decisions = [];
+  const g = createGate(
+    { mode: "enforce", ...cfg, fetch: ruleIntel(readiness, merchantCard), onDecision: (d) => decisions.push(d) },
+    QUIET,
+  );
+  const command =
+    price === null
+      ? `curl -s -X POST https://api.example-x402.dev/v1/thing -d '{"seller_wallet":"${RULE_PAYTO}"}'`
+      : curlCmd(RULE_PAYTO, "Rule thing", price);
+  const r = await g.beforeToolCall({ toolName: "exec", params: { command } });
+  return { r, decisions, d: decisions[0], g };
+}
+/** The call was refused under `reason`, its blockReason names `optOut`, and onDecision saw it. */
+function assertRefused({ r, decisions }, reason, optOut, decision) {
+  assert(r?.block === true, `expected block, got ${JSON.stringify(r)}`);
+  assert(r.refuse?.twzrd_reason === reason, `refuse reason ${r.refuse?.twzrd_reason}, expected ${reason}`);
+  assert(r.refuse.signer_invocation_count === 0 && r.refuse.usdc_spent === 0, "no signer / no USDC");
+  assert(r.blockReason.includes(reason) && r.blockReason.includes(optOut), `blockReason must cite ${reason} and ${optOut}: ${r.blockReason}`);
+  assert(decisions.length === 1, `onDecision once, got ${decisions.length}`);
+  const d = decisions[0];
+  assert(d.decision === decision[0] && d.reason_code === decision[1] && d.twzrd_reason === reason && d.pays === false,
+    `onDecision ${JSON.stringify(d)}`);
+}
+/** The call was let through, and onDecision recorded it as `decision`. */
+function assertPaid({ r, decisions }, decision, reason) {
+  assert(r === undefined, `expected pass, got ${JSON.stringify(r)}`);
+  assert(decisions.length === 1, `onDecision once, got ${decisions.length}`);
+  const d = decisions[0];
+  assert(d.decision === decision[0] && d.reason_code === decision[1] && d.pays === true, `onDecision ${JSON.stringify(d)}`);
+  if (reason) assert(d.twzrd_reason === reason, `twzrd_reason ${d.twzrd_reason}, expected ${reason}`);
+}
+
+await t("T37 warn with no recommended cap → twzrd_warn_no_cap; refuseUncappedWarn:false pays it", async () => {
+  const uncapped = { decision: "warn", trust_score: 50, score: 0.5, can_spend: true };
+  assertRefused(await ruleCall(uncapped), "twzrd_warn_no_cap", "refuseUncappedWarn: false", ["block", "INTEL_BLOCK"]);
+  assertPaid(await ruleCall(uncapped, { refuseUncappedWarn: false }), ["warn", "INTEL_WARN"], "twzrd_warn_allowed");
+});
+
+await t("T38 warn under its cap but no price named → twzrd_warn_unknown_price; refuseUncappedWarn:false pays it", async () => {
+  assertRefused(await ruleCall(WARN_CAPPED, { price: null }), "twzrd_warn_unknown_price", "refuseUncappedWarn: false", ["block", "INTEL_BLOCK"]);
+  assertPaid(await ruleCall(WARN_CAPPED, { price: null, refuseUncappedWarn: false }), ["warn", "INTEL_WARN"]);
+});
+
+await t("T39 a price above the card's recommended cap → twzrd_over_recommended_cap (warn and allow), before the merchant card", async () => {
+  const over = await ruleCall(WARN_CAPPED, { price: 0.1 });
+  assertRefused(over, "twzrd_over_recommended_cap_0.1_gt_0.05", "allowWallets", ["block", "INTEL_BLOCK"]);
+  const allowCapped = { decision: "allow", trust_score: 80, score: 0.8, can_spend: true, recommended_cap_usdc: 0.02 };
+  assertRefused(await ruleCall(allowCapped, { price: 0.03 }), "twzrd_over_recommended_cap_0.03_gt_0.02", "allowWallets", ["block", "INTEL_BLOCK"]);
+  // The cap is intel's, so refuseUncappedWarn:false does not lift it.
+  assertRefused(await ruleCall(WARN_CAPPED, { price: 0.1, refuseUncappedWarn: false }), "twzrd_over_recommended_cap_0.1_gt_0.05", "allowWallets", ["block", "INTEL_BLOCK"]);
+  assertPaid(await ruleCall(WARN_CAPPED, { price: 0.05 }), ["warn", "INTEL_WARN"], "twzrd_warn_allowed");
+});
+
+await t("T40 seller intel never evaluated → twzrd_unevaluated_subject_<null_reason> (score null alone too)", async () => {
+  assertRefused(await ruleCall(UNEVALUATED), "twzrd_unevaluated_subject_unknown_subject", "refuseUnevaluated: false", ["block", "UNKNOWN_ABOVE_LIMIT"]);
+  const scoreNull = { decision: "allow", trust_score: 60, score: null, can_spend: true, recommended_cap_usdc: 1 };
+  assertRefused(await ruleCall(scoreNull), "twzrd_unevaluated_subject_score_null", "refuseUnevaluated: false", ["block", "UNKNOWN_ABOVE_LIMIT"]);
+});
+
+await t("T41 refuseUnevaluated:false pays an unevaluated seller within its cap only, recorded as UNKNOWN_UNDER_LIMIT", async () => {
+  const opted = { refuseUnevaluated: false };
+  assertPaid(await ruleCall(UNEVALUATED, { ...opted, price: 0.05 }), ["warn", "UNKNOWN_UNDER_LIMIT"], "twzrd_unevaluated_within_cap_0.05_le_0.1");
+  assertRefused(await ruleCall(UNEVALUATED, { ...opted, price: 0.2 }), "twzrd_unevaluated_over_cap_0.2_gt_0.1", "allowWallets", ["block", "UNKNOWN_ABOVE_LIMIT"]);
+  assertRefused(await ruleCall(UNEVALUATED, { ...opted, price: null }), "twzrd_unevaluated_unknown_price_unknown_subject", "allowWallets", ["block", "UNKNOWN_ABOVE_LIMIT"]);
+  const { recommended_cap_usdc, ...uncapped } = UNEVALUATED;
+  assertRefused(await ruleCall(uncapped, opted), "twzrd_unevaluated_no_cap_unknown_subject", "allowWallets", ["block", "UNKNOWN_ABOVE_LIMIT"]);
+});
+
+await t("T42 no readiness card, or a decision this gate does not know → twzrd_decision_<decision>", async () => {
+  assertRefused(await ruleCall({ body: {} }), "twzrd_decision_undefined", "allowWallets", ["block", "INTEL_BLOCK"]);
+  assertRefused(await ruleCall({ body: { readiness_card: null } }), "twzrd_decision_undefined", "allowWallets", ["block", "INTEL_BLOCK"]);
+  assertRefused(await ruleCall({ decision: "maybe", trust_score: 90, score: 0.9, recommended_cap_usdc: 1 }), "twzrd_decision_maybe", "allowWallets", ["block", "INTEL_BLOCK"]);
+  // The local allowlist is the operator's way past it, and is not an intel outcome.
+  const allowed = await ruleCall({ body: {} }, { allowWallets: [RULE_PAYTO] });
+  assert(allowed.r === undefined && allowed.decisions.length === 0, `allowlisted: ${JSON.stringify(allowed)}`);
+});
+
+for (const [label, merchantCard] of [
+  ["wash_flagged null", { wash_flagged: null, wash_confidence: "full", ring_evaluated: true }],
+  ["partial confidence", PARTIAL_COVERAGE],
+  ["stale evidence", { ...FULL_COVERAGE, wash_stale: true }],
+  ["ring not evaluated", { ...FULL_COVERAGE, ring_evaluated: false }],
+  ["confidence (not wash_confidence) partial", { wash_flagged: false, confidence: "partial", ring_evaluated: true }],
+  ["no confidence at all", { wash_flagged: false, ring_evaluated: true }],
+  ["merchant card 404", null],
+]) {
+  await t(`T43 wash coverage not full and fresh (${label}) → twzrd_wash_unknown; refuseWashUnknown:false pays it`, async () => {
+    assertRefused(await ruleCall(WARN_CAPPED, { merchantCard }), "twzrd_wash_unknown", "refuseWashUnknown: false", ["block", "INTEL_BLOCK"]);
+    assertPaid(await ruleCall(WARN_CAPPED, { merchantCard, refuseWashUnknown: false }), ["warn", "INTEL_WARN"]);
+  });
+}
+
+await t("T44 full coverage read from confidence passes; refuseWashFlagged:false skips the merchant card, and refuseWashUnknown with it", async () => {
+  assertPaid(await ruleCall(WARN_CAPPED, { merchantCard: { wash_flagged: false, confidence: "full", ring_evaluated: true } }), ["warn", "INTEL_WARN"]);
+  let cardReads = 0;
+  const g = createGate(
+    {
+      mode: "enforce",
+      refuseWashFlagged: false,
+      fetch: async (input, init) => {
+        if (String(input?.url ?? input).includes("/merchant_card/")) cardReads += 1;
+        return ruleIntel(WARN_CAPPED, PARTIAL_COVERAGE)(input, init);
+      },
+    },
+    QUIET,
+  );
+  const r = await g.beforeToolCall({ toolName: "exec", params: { command: curlCmd(RULE_PAYTO, "Rule thing", 0.01) } });
+  assert(r === undefined && cardReads === 0, `wash off: ${JSON.stringify(r)}, card reads ${cardReads}`);
+});
+
+await t("T45 wash_flagged on a card already refused is recorded as WASH_FLAGGED", async () => {
+  const flagged = { ...FULL_COVERAGE, wash_flagged: true };
+  assertRefused(await ruleCall({ decision: "warn", trust_score: 50, score: 0.5 }, { merchantCard: flagged }), "twzrd_warn_no_cap", "refuseUncappedWarn: false", ["block", "WASH_FLAGGED"]);
+  assertRefused(await ruleCall(WARN_CAPPED, { merchantCard: flagged }), "twzrd_wash_flagged", "refuseWashFlagged: false", ["block", "WASH_FLAGGED"]);
+});
+
+await t("T46 shadow: every new refusal is a would-block, and the call runs", async () => {
+  const cases = [
+    [{ decision: "warn", trust_score: 50, score: 0.5 }, {}],
+    [WARN_CAPPED, { price: null }],
+    [WARN_CAPPED, { price: 0.1 }],
+    [UNEVALUATED, {}],
+    [{ body: {} }, {}],
+    [WARN_CAPPED, { merchantCard: PARTIAL_COVERAGE }],
+  ];
+  for (const [readiness, opts] of cases) {
+    const run = await ruleCall(readiness, { ...opts, mode: "shadow" });
+    assert(run.r === undefined, `shadow must not block: ${JSON.stringify(run.r)}`);
+    assert(run.g.stats.wouldBlock === 1 && run.g.stats.blocked === 0, `stats ${JSON.stringify(run.g.stats)}`);
+    assert(run.d?.decision === "block" && run.d.pays === true, `shadow onDecision ${JSON.stringify(run.d)}`);
+  }
+});
+
+await t("T47 onDecision: allow, block and outages map onto payment_decision.v1; a throwing callback changes nothing", async () => {
+  const allowCard = { decision: "allow", trust_score: 80, score: 0.8, can_spend: true, recommended_cap_usdc: 1 };
+  assertPaid(await ruleCall(allowCard), ["allow", "ALLOW"], "twzrd_allow");
+  // decision=block keeps its rendered reason; the transcript and onDecision carry the gate's.
+  const blocked = await ruleCall({ decision: "block", trust_score: 20, score: 0.2 });
+  assert(blocked.r?.block === true && /decision=block/.test(blocked.r.blockReason), `block: ${JSON.stringify(blocked.r)}`);
+  assert(blocked.r.refuse?.twzrd_reason === "twzrd_decision_block", `block transcript ${JSON.stringify(blocked.r.refuse)}`);
+  assert(blocked.d?.decision === "block" && blocked.d.reason_code === "INTEL_BLOCK" && blocked.d.twzrd_reason === "twzrd_decision_block",
+    `block onDecision ${JSON.stringify(blocked.d)}`);
+  // Outages: preflight down (closed refuses, open pays) and merchant card down (closed refuses).
+  const down = async () => {
+    throw new TypeError("fetch failed (ECONNREFUSED)");
+  };
+  for (const [failMode, pays] of [["closed", false], ["open", true]]) {
+    const decisions = [];
+    const g = createGate({ mode: "enforce", failMode, fetch: down, onDecision: (d) => decisions.push(d) }, QUIET);
+    const r = await g.beforeToolCall({ toolName: "exec", params: { command: curlCmd(RULE_PAYTO, "Rule thing", 0.01) } });
+    assert((r === undefined) === pays, `failMode ${failMode}: ${JSON.stringify(r)}`);
+    assert(decisions[0]?.decision === "unavailable" && decisions[0].reason_code === "INTEL_UNAVAILABLE" && decisions[0].pays === pays,
+      `failMode ${failMode} onDecision ${JSON.stringify(decisions)}`);
+  }
+  const cardDown = [];
+  const gc = createGate({ mode: "enforce", fetch: makeCardOutageFetch({ preflight: 0, card: 0 }), onDecision: (d) => cardDown.push(d) }, QUIET);
+  const rc = await gc.beforeToolCall({ toolName: "exec", params: { command: curlCmd(RULE_PAYTO, "Rule thing", 0.01) } });
+  assert(rc?.block === true && cardDown[0]?.reason_code === "INTEL_UNAVAILABLE" && cardDown[0].twzrd_reason === "twzrd_card_unreachable",
+    `card outage onDecision ${JSON.stringify(cardDown)}`);
+  const cardDownOpen = [];
+  const go = createGate(
+    { mode: "enforce", failMode: "open", fetch: makeCardOutageFetch({ preflight: 0, card: 0 }), onDecision: (d) => cardDownOpen.push(d) },
+    QUIET,
+  );
+  const ro = await go.beforeToolCall({ toolName: "exec", params: { command: curlCmd(RULE_PAYTO, "Rule thing", 0.01) } });
+  assert(ro === undefined && cardDownOpen[0]?.decision === "unavailable" && cardDownOpen[0].pays === true,
+    `card outage, failMode open: ${JSON.stringify(ro)} ${JSON.stringify(cardDownOpen)}`);
+  // A callback that throws, or rejects, never changes the verdict.
+  for (const onDecision of [
+    () => {
+      throw new Error("telemetry down");
+    },
+    async () => {
+      throw new Error("telemetry down");
+    },
+  ]) {
+    const paid = createGate({ mode: "enforce", fetch: ruleIntel(WARN_CAPPED), onDecision }, QUIET);
+    const r1 = await paid.beforeToolCall({ toolName: "exec", params: { command: curlCmd(RULE_PAYTO, "Rule thing", 0.01) } });
+    assert(r1 === undefined, `throwing onDecision must not refuse: ${JSON.stringify(r1)}`);
+    const refused = createGate({ mode: "enforce", fetch: ruleIntel(UNEVALUATED), onDecision }, QUIET);
+    const r2 = await refused.beforeToolCall({ toolName: "exec", params: { command: curlCmd(RULE_PAYTO, "Rule thing", 0.01) } });
+    assert(r2?.block === true, `throwing onDecision must not pass a refusal: ${JSON.stringify(r2)}`);
+  }
+});
+
+await t("T48 the card is cached, the verdict is not: the same seller is re-evaluated at each call's price", async () => {
+  let preflights = 0;
+  const g = createGate(
+    {
+      mode: "enforce",
+      fetch: async (input, init) => {
+        if (String(input?.url ?? input).includes("/v1/intel/preflight")) preflights += 1;
+        return ruleIntel(WARN_CAPPED)(input, init);
+      },
+    },
+    QUIET,
+  );
+  const under = await g.beforeToolCall({ toolName: "exec", params: { command: curlCmd(RULE_PAYTO, "Rule thing", 0.01) } });
+  const over = await g.beforeToolCall({ toolName: "exec", params: { command: curlCmd(RULE_PAYTO, "Rule thing", 0.5) } });
+  assert(under === undefined, `under cap must pass: ${JSON.stringify(under)}`);
+  assert(over?.block === true && over.refuse?.twzrd_reason === "twzrd_over_recommended_cap_0.5_gt_0.05", `over cap must refuse: ${JSON.stringify(over)}`);
+  assert(preflights === 1, `one preflight for both calls, got ${preflights}`);
 });
 
 await t("TX offline: every intel request was one the stub has a recorded answer for", async () => {
