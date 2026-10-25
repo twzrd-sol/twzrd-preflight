@@ -450,6 +450,7 @@ await t("T12 factory defaults are enforce + fail-closed + wash refuse", async ()
   assert(DEFAULTS.mode === "enforce", `mode default ${DEFAULTS.mode}`);
   assert(DEFAULTS.failMode === "closed", `failMode default ${DEFAULTS.failMode}`);
   assert(DEFAULTS.refuseWashFlagged === true, "refuseWashFlagged must default true");
+  assert(DEFAULTS.refuseUnparsedPayments === true, "refuseUnparsedPayments must default true");
   const pkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
   const pluginManifest = JSON.parse(
     await readFile(new URL("../openclaw.plugin.json", import.meta.url), "utf8"),
@@ -465,6 +466,10 @@ await t("T12 factory defaults are enforce + fail-closed + wash refuse", async ()
   assert(
     pluginManifest.configSchema.properties.refuseWashFlagged.default === true,
     "manifest refuseWashFlagged default",
+  );
+  assert(
+    pluginManifest.configSchema.properties.refuseUnparsedPayments?.default === true,
+    "manifest refuseUnparsedPayments default",
   );
 });
 
@@ -970,6 +975,115 @@ await t("T31 TWZRD_REFUSE_WASH_UNKNOWN=1 reaches the 402 wrap (partial refused, 
     const r = await g.beforeToolCall({ toolName: "exec", params: { command: curlCmd(CLEAN_PAYTO, "Clean thing", 0.01) } });
     assert(r === undefined, `tool hook must still allow partial coverage, got ${JSON.stringify(r)}`);
   });
+});
+
+// ---- a payment-shaped call whose payee cannot be read is refused, not skipped ----
+const PAID_URL = "https://api.example-x402.dev/v1/thing";
+const SIGNED = "eyJ4NDAyVmVyc2lvbiI6Mn0"; // stand-in payment payload; the hook never decodes it
+/** An intel fetch that must not be reached; counts the attempt so the test can fail on it. */
+function noIntel(counter) {
+  return async (input) => {
+    counter.intel += 1;
+    throw new Error(`intel must not be called: ${typeof input === "string" ? input : input.url}`);
+  };
+}
+
+for (const [label, command] of [
+  ["v1 X-PAYMENT", `curl -s ${PAID_URL} -H 'X-PAYMENT: ${SIGNED}'`],
+  ["v2 PAYMENT-SIGNATURE", `curl -s -H "PAYMENT-SIGNATURE: ${SIGNED}" ${PAID_URL}`],
+  ["wget --header=", `wget -qO- --header='X-PAYMENT: ${SIGNED}' ${PAID_URL}`],
+]) {
+  await t(`T32 exec sending a signed payment (${label}) with no readable payee → block, no intel`, async () => {
+    const counter = { intel: 0 };
+    const g = createGate({ mode: "enforce", failMode: "open", fetch: noIntel(counter) }, QUIET);
+    const r = await g.beforeToolCall({ toolName: "exec", params: { command } });
+    assert(r?.block === true, `expected block, got ${JSON.stringify(r)}`);
+    assert(/signed x402 payment to https:\/\/api\.example-x402\.dev/.test(r.blockReason), `reason: ${r.blockReason}`);
+    assert(/refuseUnparsedPayments: false/.test(r.blockReason), "reason names the opt-out");
+    // The header was signed before this hook ran: no transcript claiming zero signer calls.
+    assert(r.refuse === undefined, `signed command must carry no refuse transcript, got ${JSON.stringify(r.refuse)}`);
+    assert(counter.intel === 0 && g.lastRequest === null, "no intel call");
+    assert(g.stats.unparsed === 1 && g.stats.blocked === 1 && g.stats.evaluated === 0, `stats ${JSON.stringify(g.stats)}`);
+  });
+}
+
+await t("T33 exec sending a signed payment to an origin whose 402 was seen → gated on that payTo", async () => {
+  const g = createGate({ mode: "enforce" }, QUIET);
+  await g.afterToolCall({
+    toolName: "exec",
+    params: { command: `curl -s ${PAID_URL}` },
+    result: `HTTP/1.1 402 {"accepts":[{"payTo":"${BLOCK_WALLET}","amount":"50000"}]}`,
+  });
+  const r = await g.beforeToolCall({
+    toolName: "exec",
+    params: { command: `curl -s ${PAID_URL} -H 'X-PAYMENT: ${SIGNED}'` },
+  });
+  assert(g.lastRequest?.seller_wallet === BLOCK_WALLET, `preflight must get the cached payTo, got ${JSON.stringify(g.lastRequest)}`);
+  assert(r?.block === true && /decision=block/.test(r.blockReason), `expected decision block, got ${JSON.stringify(r)}`);
+  assert(r.refuse === undefined, "signed command: no refuse transcript");
+  assert(g.stats.unparsed === 0 && g.stats.evaluated === 1, `stats ${JSON.stringify(g.stats)}`);
+
+  const g2 = createGate({ mode: "enforce" }, QUIET);
+  await g2.afterToolCall({
+    toolName: "exec",
+    params: { command: `curl -s ${PAID_URL}` },
+    result: `HTTP/1.1 402 {"accepts":[{"payTo":"${UNKNOWN_WALLET}","amount":"50000"}]}`,
+  });
+  const r2 = await g2.beforeToolCall({
+    toolName: "exec",
+    params: { command: `curl -s ${PAID_URL} -H 'X-PAYMENT: ${SIGNED}'` },
+  });
+  assert(r2 === undefined, `cached warn payTo must pass, got ${JSON.stringify(r2)}`);
+});
+
+await t("T34 payment-named tool with its URL outside origin/url → block before the tool (and its signer) runs", async () => {
+  const counter = { intel: 0 };
+  const g = createGate({ mode: "enforce", fetch: noIntel(counter) }, QUIET);
+  const r = await g.beforeToolCall({ toolName: "x402_pay", params: { endpoint: PAID_URL, max_usdc: 0.05 } });
+  assert(r?.block === true, `expected block, got ${JSON.stringify(r)}`);
+  assert(/x402_pay is a payment tool/.test(r.blockReason) && /matcher/.test(r.blockReason), `reason: ${r.blockReason}`);
+  assert(r.refuse?.twzrd_reason === "twzrd_unparsed_payment", `refuse ${JSON.stringify(r.refuse)}`);
+  assert(r.refuse.signer_invocation_count === 0 && r.refuse.usdc_spent === 0, "no signer / no USDC");
+  assert(counter.intel === 0, "no intel call");
+  // A matcher naming the payee param turns the refusal into a normal check.
+  const g2 = createGate({ mode: "enforce", matchers: [{ tool: "x402_pay", walletParam: "payee" }] }, QUIET);
+  const r2 = await g2.beforeToolCall({ toolName: "x402_pay", params: { endpoint: PAID_URL, payee: UNKNOWN_WALLET } });
+  assert(r2 === undefined && g2.stats.unparsed === 0, `matcher path must check, not refuse: ${JSON.stringify(r2)}`);
+  assert(g2.lastRequest?.seller_wallet === UNKNOWN_WALLET, `matcher payee sent to preflight: ${JSON.stringify(g2.lastRequest)}`);
+});
+
+for (const [label, toolName, params] of [
+  ["exec curl with no payment header", "exec", { command: `curl -s ${PAID_URL}` }],
+  ["exec grep for the header name (no URL)", "exec", { command: `grep -rn "X-PAYMENT:" src/` }],
+  ["exec sending X-PAYMENT-RESPONSE", "exec", { command: `curl -s ${PAID_URL} -H 'X-PAYMENT-RESPONSE: ${SIGNED}'` }],
+  ["'pay' inside a word (payload)", "inspect_payload", { target: PAID_URL }],
+  ["'pay' inside a word (taxpayer)", "taxpayer_lookup", { source: PAID_URL }],
+  ["payment-named tool with no URL", "agentcash_get_balance", {}],
+  ["loop guard: signed payment aimed at intel itself", "exec", { command: `curl -s https://intel.twzrd.xyz/v1/intel/quick/x -H 'X-PAYMENT: ${SIGNED}'` }],
+]) {
+  await t(`T35 not payment-shaped or not ours: ${label} → no gate`, async () => {
+    const counter = { intel: 0 };
+    const g = createGate({ mode: "enforce", fetch: noIntel(counter) }, QUIET);
+    const r = await g.beforeToolCall({ toolName, params });
+    assert(r === undefined, `expected no gate, got ${JSON.stringify(r)}`);
+    assert(g.stats.unparsed === 0 && counter.intel === 0, `stats ${JSON.stringify(g.stats)} intel ${counter.intel}`);
+  });
+}
+
+await t("T36 shadow logs an unparsed payment as a would-block; refuseUnparsedPayments:false restores 0.4.3", async () => {
+  const command = `curl -s ${PAID_URL} -H 'X-PAYMENT: ${SIGNED}'`;
+  const shadow = createGate({ mode: "shadow", fetch: noIntel({ intel: 0 }) }, QUIET);
+  const r = await shadow.beforeToolCall({ toolName: "exec", params: { command } });
+  assert(r === undefined && shadow.stats.wouldBlock === 1 && shadow.stats.unparsed === 1, `shadow ${JSON.stringify(shadow.stats)}`);
+  const off = createGate({ mode: "enforce", refuseUnparsedPayments: false, fetch: noIntel({ intel: 0 }) }, QUIET);
+  for (const call of [
+    { toolName: "exec", params: { command } },
+    { toolName: "x402_pay", params: { endpoint: PAID_URL } },
+  ]) {
+    const r2 = await off.beforeToolCall(call);
+    assert(r2 === undefined, `opted out must not refuse ${call.toolName}, got ${JSON.stringify(r2)}`);
+  }
+  assert(off.stats.unparsed === 0 && off.stats.blocked === 0, `off ${JSON.stringify(off.stats)}`);
 });
 
 await t("TX offline: every intel request was one the stub has a recorded answer for", async () => {

@@ -24,6 +24,11 @@
         "default": true,
         "description": "Refuse payTo when free merchant_card.wash_flagged is true. Opt out with false."
       },
+      "refuseUnparsedPayments": {
+        "type": "boolean",
+        "default": true,
+        "description": "Refuse a payment-shaped tool call whose payee cannot be read: an exec curl/wget sending a signed PAYMENT-SIGNATURE or X-PAYMENT header with no seller wallet and no observed 402 payTo for its origin, or a payment-named tool whose URL is not in an origin or url param. Opt out with false."
+      },
       "timeoutMs": {
         "type": "number",
         "default": 5000,

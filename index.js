@@ -11,6 +11,7 @@
  *
  * Gate rule for tool calls: decision === "block" OR wash_flagged (default).
  * NEVER gate on can_spend alone (free tier defaults can_spend:false for unknown).
+ * A payment-shaped call whose payee cannot be read is refused (refuseUnparsedPayments).
  *
  * Privacy: tool call metadata (toolName, seller_wallet, resource_name,
  * price_usdc) is sent to intel.twzrd.xyz for trust scoring. No payload
@@ -37,6 +38,7 @@ export const DEFAULTS = {
   mode: "enforce", // off | shadow | enforce — shadow is opt-in
   failMode: "closed", // closed = fail-closed; open is opt-in
   refuseWashFlagged: true, // wash_flagged payTo refuses; opt out with false
+  refuseUnparsedPayments: true, // payment-shaped call with no readable payee refuses; opt out with false
   timeoutMs: 5000,
   maxPriceUsdc: null,
   endpoint: "https://intel.twzrd.xyz",
@@ -54,9 +56,25 @@ const RE = {
   price: /"price_usdc"\s*:\s*([0-9.]+)/,
   resourceName: /"resource_name"\s*:\s*"([^"]{1,128})"/,
   url: /https?:\/\/[^\s"'<>]+/g,
+  // curl/wget sending an x402 payment header (not X-PAYMENT-RESPONSE): the header is the
+  // signed payment, so the command pays whoever that payment names.
+  paymentHeader: /(?:^|\s)(?:-H|--header)(?:\s+|=)['"]?\s*(?:payment-signature|x-payment)\s*:/i,
 };
 const EXEC_TOOLS = new Set(["exec", "bash", "shell", "system.run", "run"]);
 const PAYMENTISH_TOOL = /agentcash|x402|pay/i;
+const PAYMENT_WORDS = new Set(["pay", "pays", "payment", "payments"]);
+
+/**
+ * Payment-named by whole word: agentcash_fetch, x402_pay, make_payment, fetchWithPayment.
+ * Not inspect_payload or taxpayer_lookup, which PAYMENTISH_TOOL also matches. Only the
+ * refusal of a call with no readable payee uses this narrower test.
+ */
+function paymentNamed(toolName) {
+  const name = String(toolName ?? "");
+  if (/agentcash|x402/i.test(name)) return true;
+  const words = name.replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase().split(/[^a-z0-9]+/);
+  return words.some((w) => PAYMENT_WORDS.has(w));
+}
 
 function host(u) {
   try {
@@ -88,7 +106,7 @@ export function createGate(rawCfg = {}, logger = console) {
   const payToByOrigin = new Map();
   /** cacheKey -> { decision, ts } */
   const decisionCache = new Map();
-  const stats = { evaluated: 0, blocked: 0, wouldBlock: 0, apiFailures: 0 };
+  const stats = { evaluated: 0, blocked: 0, wouldBlock: 0, apiFailures: 0, unparsed: 0 };
   /** last preflight request body — test/debug introspection */
   let lastRequest = null;
 
@@ -97,9 +115,9 @@ export function createGate(rawCfg = {}, logger = console) {
   }
 
   /**
-   * Extract a payment intent from a tool call, or null when the call is not
-   * payment-shaped. Conservative on purpose: a failed parse means NO gate
-   * (never block on our own extraction bugs).
+   * Extract a payment intent from a tool call, or null when none can be read. A null
+   * here is not yet a pass: beforeToolCall asks unparsedPayment whether the call is
+   * still a payment, and refuses it if so.
    */
   function matchIntent(toolName, params) {
     // Loop guard: never gate calls aimed at the trust API itself.
@@ -145,7 +163,21 @@ export function createGate(rawCfg = {}, logger = console) {
     if ((EXEC_TOOLS.has(toolName) || command) && command) {
       if (selfHost && command.includes(selfHost)) return null; // loop guard
       const wallet = RE.sellerWallet.exec(command)?.[1] ?? RE.payToKv.exec(command)?.[1] ?? null;
-      if (!wallet) return null;
+      if (!wallet) {
+        // A command that sends a signed x402 payment header pays the URL's origin. Its
+        // payee is readable only from the payTo this gate saw in that origin's 402.
+        const origin = RE.paymentHeader.test(command) ? originOf(command.match(RE.url)?.[0] ?? "") : null;
+        const cached = origin ? payToByOrigin.get(origin) : null;
+        if (!fresh(cached)) return null;
+        return {
+          sellerWallet: cached.wallet,
+          priceUsdc: null,
+          resourceName: null,
+          origin,
+          source: "exec:payment-header+payTo-cache",
+          signed: true,
+        };
+      }
       const price = RE.price.exec(command)?.[1];
       return {
         sellerWallet: wallet,
@@ -173,6 +205,45 @@ export function createGate(rawCfg = {}, logger = console) {
     }
 
     return null;
+  }
+
+  /**
+   * For a call matchIntent could not read: why it is still a payment, or null when it is
+   * not payment-shaped. Two shapes count:
+   *   - an exec command sending a signed x402 payment header to a URL. It was signed before
+   *     this hook ran, so refusing it stops the payment being sent, not the signing;
+   *   - a whole-word payment-named tool that carries a URL in a param other than
+   *     origin/url. The tool has not run, so its signer has not either.
+   */
+  function unparsedPayment(toolName, params) {
+    let paramText = "";
+    try {
+      paramText = JSON.stringify(params) ?? "";
+    } catch {
+      paramText = "";
+    }
+    if (selfHost && paramText.includes(selfHost)) return null; // loop guard
+    const command = typeof params?.command === "string" ? params.command : null;
+    if (command) {
+      const url = command.match(RE.url)?.[0];
+      if (!url || !RE.paymentHeader.test(command)) return null;
+      return {
+        signed: true,
+        target: originOf(url) ?? url,
+        why:
+          `this command sends a signed x402 payment to ${originOf(url) ?? url}, but names no Solana ` +
+          `seller wallet, and this gate has seen no 402 from that origin to read the payee from`,
+        fix: "Make the unpaid request first, so the 402's payTo is observed",
+      };
+    }
+    const url = paramText.match(RE.url)?.[0];
+    if (!url || !paymentNamed(toolName)) return null;
+    return {
+      signed: false,
+      target: originOf(url) ?? url,
+      why: `${toolName} is a payment tool, and its URL is not in an origin or url param this gate reads`,
+      fix: "Add a matcher for this tool naming its urlParam or walletParam",
+    };
   }
 
   /** POST the free preflight. Returns "allow"|"warn"|"block", or null on failure. */
@@ -238,10 +309,35 @@ export function createGate(rawCfg = {}, logger = console) {
     return false;
   }
 
+  /**
+   * The gate_eval_refuse transcript records signer_invocation_count 0. A command that
+   * already carries a signed payment header was signed before this hook ran, so it gets
+   * no transcript.
+   */
+  function refuseFor(intent, reason) {
+    if (intent.signed) return undefined;
+    return buildRefuse({ payTo: intent.sellerWallet, reason, verdict: "block" });
+  }
+
   async function beforeToolCall(event /*, ctx */) {
     if (cfg.mode === "off") return;
     const intent = matchIntent(event.toolName, event.params ?? {});
-    if (!intent) return;
+    if (!intent) {
+      // Refused whatever failMode says: this is not an outage, there is no payee to ask about.
+      const unparsed = cfg.refuseUnparsedPayments ? unparsedPayment(event.toolName, event.params ?? {}) : null;
+      if (!unparsed) return;
+      stats.unparsed += 1;
+      if (verdict(`unparsed payment (${unparsed.why})`, { origin: unparsed.target }, event.toolName)) {
+        return {
+          block: true,
+          blockReason:
+            `TWZRD trust gate: ${unparsed.why}, so the payee could not be checked and the call ` +
+            `was not run. ${unparsed.fix}, or the operator can set refuseUnparsedPayments: false.`,
+          refuse: refuseFor(unparsed, "twzrd_unparsed_payment"),
+        };
+      }
+      return;
+    }
     stats.evaluated += 1;
 
     if (intent.sellerWallet && cfg.allowWallets.includes(intent.sellerWallet)) return;
@@ -281,11 +377,7 @@ export function createGate(rawCfg = {}, logger = console) {
             block: true,
             blockReason:
               "TWZRD trust gate: trust API unreachable and failMode=closed — payment not evaluated.",
-            refuse: buildRefuse({
-              payTo: intent.sellerWallet,
-              reason: "twzrd_fail_closed",
-              verdict: "block",
-            }),
+            refuse: refuseFor(intent, "twzrd_fail_closed"),
           };
         }
       }
@@ -311,11 +403,7 @@ export function createGate(rawCfg = {}, logger = console) {
               block: true,
               blockReason:
                 "TWZRD trust gate: merchant_card (wash check) unreachable and failMode=closed — payment not evaluated.",
-              refuse: buildRefuse({
-                payTo: intent.sellerWallet,
-                reason: "twzrd_card_unreachable",
-                verdict: "block",
-              }),
+              refuse: refuseFor(intent, "twzrd_card_unreachable"),
             };
           }
           return;
@@ -341,11 +429,7 @@ export function createGate(rawCfg = {}, logger = console) {
         return {
           block: true,
           blockReason: renderReason(intent, key),
-          refuse: buildRefuse({
-            payTo: intent.sellerWallet,
-            reason: wash.reason,
-            verdict: "block",
-          }),
+          refuse: refuseFor(intent, wash.reason),
         };
       }
     }

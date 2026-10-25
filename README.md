@@ -12,6 +12,10 @@
 OpenClaw plugin **0.4.3**: install = intercept. Pin **`twzrd-x402-gate@0.12.5`**
 (exact; same line as other TWZRD seats).
 
+**On `main`, not in a release:** the `before_tool_call` hook refuses a payment-shaped call
+whose payee it cannot read, where 0.4.3 let it run unchecked. See
+[What it covers](#what-it-covers-honest). Opt out with `refuseUnparsedPayments: false`.
+
 0.4.3 moves the gate pin from 0.12.0 to 0.12.5. By default nothing this plugin
 decides changes:
 
@@ -161,6 +165,7 @@ proof, not an EXTERNAL_RUN. No invented ALLOW txs.
 | `mode` | `"enforce"` | `off` / `shadow` (opt-in log-only) / `enforce` |
 | `failMode` | `"closed"` | `closed` (block on intel outage) or `open` (opt-in allow) |
 | `refuseWashFlagged` | `true` | Refuse when merchant_card.wash_flagged; opt out with `false` |
+| `refuseUnparsedPayments` | `true` | Refuse a payment-shaped tool call whose payee cannot be read (see below); opt out with `false` |
 | `timeoutMs` | `5000` | Preflight HTTP timeout in ms |
 | `maxPriceUsdc` | `null` | Local price ceiling — blocks above this USDC amount without API call |
 | `endpoint` | `"https://intel.twzrd.xyz"` | TWZRD intel API base URL |
@@ -216,12 +221,26 @@ Built-in coverage: AgentCash MCP tools + exec/curl x402 payments. For other paym
 - **MCP payment tools** (AgentCash `fetch`/`bridge` style): counterparty = `origin`/`url`
   param, upgraded to the real Solana `payTo` wallet once a 402 envelope has been observed
   (`after_tool_call` cache).
-- **exec/curl x402 payments**: conservative regex extraction of `seller_wallet`/`payTo`/
-  `price_usdc`/`resource_name` from the command string. Failed parse = no gate (never blocks
-  on extraction bugs).
+- **exec/curl x402 payments**: regex extraction of `seller_wallet`/`payTo`/`price_usdc`/
+  `resource_name` from the command string. A curl or wget command that sends a signed
+  `PAYMENT-SIGNATURE` or `X-PAYMENT` header (`-H` / `--header`) with no seller wallet is
+  checked against the `payTo` this gate saw in that origin's 402 (`after_tool_call` cache).
 - **Custom matchers**: operator-defined tool + param mappings for any other payment rail.
+- **A payment it cannot read is refused** (`refuseUnparsedPayments`, default on). Two shapes:
+  - an exec command sending a signed payment header to a URL, with no seller wallet and no
+    observed 402 for its origin. The header was signed before the hook ran, so the refusal
+    stops the payment being sent, not the signing, and carries no refuse transcript;
+  - a tool named, by whole word, as a payment tool (`agentcash`, `x402`, `pay`, `payment`)
+    that carries a URL outside the `origin`/`url` params. The tool does not run, so neither
+    does its signer.
+
+  A refusal applies whatever `failMode` says (it is not an outage), and `shadow` logs it as a
+  would-block. A read-only tool in a payment-named family, such as one whose `resource_url`
+  param is not read, is refused too; a custom matcher for it turns the refusal into a check.
 - **NOT covered**: ClawRouter proxy settlements (sign inside localhost:8402, invisible to tool
-  hooks — needs ClawRouter's upstream `onBeforePayment` hook).
+  hooks — needs ClawRouter's upstream `onBeforePayment` hook). An exec that pays inside another
+  CLI, with no payment header on its command line, is not seen. A payee named inside the
+  header payload is not decoded.
 
 ## Gate rules
 
@@ -229,6 +248,8 @@ Built-in coverage: AgentCash MCP tools + exec/curl x402 payments. For other paym
   which is allowed by default).
 - `shadow` mode: evaluates + logs would-blocks, never blocks.
 - Fail-closed by default: trust API unreachable = block (`failMode: "open"` is opt-in allow).
+- A payment-shaped call with no readable payee = block, in either `failMode`
+  (`refuseUnparsedPayments: false` is opt-in skip).
 - Local policy (denylist, allowlist, price cap) runs without any API call.
 - Loop guard: calls to the trust API itself are never gated.
 
