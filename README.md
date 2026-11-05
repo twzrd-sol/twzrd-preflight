@@ -1,17 +1,29 @@
 # twzrd-preflight
 
-> **Status (2026-10-25): reference implementation.** This plugin is maintained as a
+> **Status (2026-11-05): reference implementation.** This plugin is maintained as a
 > worked example of a TWZRD seat (a `before_tool_call` hook plus a 402 fetch wrap over
 > `twzrd-x402-gate`). Its gate pin is not bumped on each gate release; the live, maintained
 > surface is the gate itself (`twzrd-x402-gate` in `twzrd-sol/twzrd-trust`). The plugin was
 > frozen on 2026-10-23 after a 90-day usage review: every call it made to intel fell on its own
-> release and test days, with no external host running it. 0.5.0 is an operator-approved
-> release onto gate 0.13.0. The 402 wrap is the gate's own wrapper with its defaults. The hook
-> copies the gate's readiness and wash rules, with the differences listed under
-> [Gate rules](#gate-rules), and agrees with the gate on all 17 shared guard vectors.
+> release and test days, with no external host running it. 0.5.1 is a pin move onto gate 0.16.1
+> (opt-in Demand Desk replay guard; default allow/refuse unchanged). The 402 wrap is the gate's
+> own wrapper with its defaults. The hook copies the gate's readiness and wash rules, with the
+> differences listed under [Gate rules](#gate-rules), and agrees with the gate on all 17 shared
+> guard vectors.
 
-OpenClaw plugin **0.5.0**: install = intercept. Pin **`twzrd-x402-gate@0.13.0`**
+OpenClaw plugin **0.5.1**: install = intercept. Pin **`twzrd-x402-gate@0.16.1`**
 (exact; same line as other TWZRD seats).
+
+0.5.1 moves the gate pin from 0.13.0 to 0.16.1. By default nothing this plugin
+decides changes:
+
+- 0.13.1 is types and docs only (`TwzrdReadinessBasisEntry`). This plugin does not read `basis`.
+- 0.14.0 and 0.15.0 add Demand Desk authorization entry points
+  (`verifyDemandDeskAuthorization`, `createDemandDeskWallet`). This plugin does not call them.
+- 0.16.0 lets a Foundation `@solana/mpp` solana/charge reach preflight instead of throwing
+  `MALFORMED_CHALLENGE`. This plugin does not call `mppChallengeToIntent`.
+- 0.16.1 adds opt-in `createDemandDeskWallet({ replayGuard })`. Without that option, nothing
+  changes. This plugin does not call `createDemandDeskWallet`.
 
 0.5.0 moves the gate pin from 0.12.5 to 0.13.0, and it changes what this plugin refuses by
 default:
@@ -69,11 +81,11 @@ and T29).
 
 `wrapFetchWithTwzrdPreflight` runs TWZRD preflight + merchant_card **wash refuse**
 on every HTTP **402** before a signer can attach payment. Defaults: **enforce**,
-**fail-closed**, **refuseWashFlagged on**, and gate 0.13.0's `refuseWashUnknown`,
+**fail-closed**, **refuseWashFlagged on**, and gate 0.16.1's `refuseWashUnknown`,
 `refuseUncappedWarn` and `refuseUnevaluated` on. Shadow / fail-open / each opt-out are opt-in.
 
 Since 0.4.0 it reads a 402 the way the payer does and checks every offer the payer
-could pick, matching the gate's own wrapper (`twzrd-x402-gate@0.13.0`):
+could pick, matching the gate's own wrapper (`twzrd-x402-gate@0.16.1`):
 
 - x402 v2 requirements are read from the `PAYMENT-REQUIRED` header (base64 JSON)
   before the body. An undecodable header is refused. 0.3.0 refused every
@@ -152,7 +164,7 @@ Each piece below works alone. Plugged into the hosted checks, they form one pre-
 
 ```bash
 npm install twzrd-preflight
-# depends on twzrd-x402-gate@0.13.0 (exact)
+# depends on twzrd-x402-gate@0.16.1 (exact)
 ```
 
 Register in your OpenClaw config:
@@ -287,7 +299,7 @@ Built-in coverage: AgentCash MCP tools + exec/curl x402 payments. For other paym
 
 ## Gate rules
 
-The tool-call hook's rules copy `twzrd-x402-gate` 0.13.0 (`evaluateReadinessCard` and the
+The tool-call hook's rules copy `twzrd-x402-gate` 0.16.1 (`evaluateReadinessCard` and the
 merchant-card wash check), with the gate's reason strings. They run in the gate's order:
 
 | Refuses | Reason | Opt-out |
@@ -349,7 +361,7 @@ T10e) run on 24 only, because openclaw needs Node >=24.16.
 `onDecision`, which must fire exactly once and match what the hook did.
 
 Verified against OpenClaw **2026.7.1-2** (`openclaw.build.openclawVersion` + T10c).
-Gate pin: `twzrd-x402-gate@0.13.0`. Refuse-bin spawn without `@x402/*` peers is a
+Gate pin: `twzrd-x402-gate@0.16.1`. Refuse-bin spawn without `@x402/*` peers is a
 missing-peer fail (exit 2), not a live dogfood EXTERNAL_RUN.
 
 ## CLI

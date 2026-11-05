@@ -458,9 +458,9 @@ await t("T12 factory defaults are enforce + fail-closed + wash refuse", async ()
   const pluginManifest = JSON.parse(
     await readFile(new URL("../openclaw.plugin.json", import.meta.url), "utf8"),
   );
-  assert(pkg.version === "0.5.0", `package.json version ${pkg.version}`);
-  assert(pluginManifest.version === "0.5.0", `plugin manifest version ${pluginManifest.version}`);
-  assert(pkg.dependencies?.["twzrd-x402-gate"] === "0.13.0", `gate pin ${pkg.dependencies?.["twzrd-x402-gate"]}`);
+  assert(pkg.version === "0.5.1", `package.json version ${pkg.version}`);
+  assert(pluginManifest.version === "0.5.1", `plugin manifest version ${pluginManifest.version}`);
+  assert(pkg.dependencies?.["twzrd-x402-gate"] === "0.16.1", `gate pin ${pkg.dependencies?.["twzrd-x402-gate"]}`);
   assert(pluginManifest.configSchema.properties.mode.default === "enforce", "manifest mode default");
   assert(
     pluginManifest.configSchema.properties.failMode.default === "closed",
@@ -620,11 +620,11 @@ function makeWashIntelFetch(counter) {
   };
 }
 
-await t("T17 installed twzrd-x402-gate is exact 0.13.0 + 0.13.0 APIs export", async () => {
+await t("T17 installed twzrd-x402-gate is exact 0.16.1 + 0.16.1 APIs export", async () => {
   const dir = path.join(fileURLToPath(new URL("../", import.meta.url)), "node_modules", "twzrd-x402-gate");
   const gatePkg = JSON.parse(await readFile(path.join(dir, "package.json"), "utf8"));
-  assert(gatePkg.version === "0.13.0", `installed gate ${gatePkg.version}`);
-  assert(GATE_CLIENT_VERSION === "0.13.0", `CLIENT_VERSION ${GATE_CLIENT_VERSION}`);
+  assert(gatePkg.version === "0.16.1", `installed gate ${gatePkg.version}`);
+  assert(GATE_CLIENT_VERSION === "0.16.1", `CLIENT_VERSION ${GATE_CLIENT_VERSION}`);
   assert(typeof createTwzrdBeforePaymentHook === "function", "createTwzrdBeforePaymentHook export");
   assert(
     typeof gatePkg.bin?.["twzrd-gate-eval-refuse"] === "string",
@@ -634,7 +634,7 @@ await t("T17 installed twzrd-x402-gate is exact 0.13.0 + 0.13.0 APIs export", as
   const wrapCode = wrapRaw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
   assert(
     !/\bpaymentRequiredFromResponse\b/.test(wrapCode),
-    "wrap-fetch must not import paymentRequiredFromResponse (not a 0.13.0 package export)",
+    "wrap-fetch must not import paymentRequiredFromResponse (not a 0.16.1 package export)",
   );
 });
 
@@ -785,7 +785,7 @@ const FULL_COVERAGE = { wash_flagged: false, wash_confidence: "full", ring_evalu
 
 /**
  * Intel mock: every seller is an evaluated allow with full, fresh wash coverage; DIRTY_PAYTO
- * is wash-flagged. Gate 0.13.0 refuses less than full coverage by default (refuseWashUnknown).
+ * is wash-flagged. Gate 0.16.1 refuses less than full coverage by default (refuseWashUnknown).
  */
 function makeOfferIntel(counter) {
   return async (input, init) => {
@@ -934,7 +934,7 @@ await t("T29 clean offer + sibling with no recipient → refused whole", async (
   assert(err.message.includes("twzrd_unidentifiable_payment_recipient"), `reason: ${err.message}`);
 });
 
-// ---- gate 0.13.0: the 402 wrap's refuseWashUnknown, refuseUncappedWarn, refuseUnevaluated (on by default) ----
+// ---- gate 0.16.1: the 402 wrap's refuseWashUnknown, refuseUncappedWarn, refuseUnevaluated (on by default) ----
 /** makeOfferIntel, but every merchant_card answers with `card` (wash coverage fields included). */
 function makeCardIntel(counter, card) {
   const base = makeOfferIntel(counter);
@@ -1166,7 +1166,7 @@ await t("T36 shadow logs an unparsed payment as a would-block; refuseUnparsedPay
   assert(off.stats.unparsed === 0 && off.stats.blocked === 0, `off ${JSON.stringify(off.stats)}`);
 });
 
-// ---- the gate 0.13.0 rules: caps, unevaluated sellers, missing cards, wash coverage ----
+// ---- the gate 0.16.1 rules: caps, unevaluated sellers, missing cards, wash coverage ----
 const RULE_PAYTO = "RuLeRuLeRuLeRuLeRuLeRuLeRuLeRuLeRuLe11111";
 const WARN_CAPPED = { decision: "warn", trust_score: 50, score: 0.5, can_spend: true, recommended_cap_usdc: 0.05 };
 const UNEVALUATED = { decision: "warn", trust_score: 45, score: null, null_reason: "unknown_subject", can_spend: false, recommended_cap_usdc: 0.1 };

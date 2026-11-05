@@ -16,7 +16,7 @@
 // KNOWN_DIVERGENCE pins a vector the hook disagrees with, with the outcome it reaches, the way
 // twzrd-trust pins plugin-trustgate. A new divergence fails, one that changes shape fails, and
 // one that goes away fails until it is removed from the list. It is empty: the hook copies the
-// gate 0.13.0 rules every applicable vector exercises.
+// gate 0.16.1 rules every applicable vector exercises.
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
