@@ -1,14 +1,14 @@
 /**
  * HTTP 402 intercept for twzrd-preflight.
  *
- * Thin wrapper around twzrd-x402-gate@0.16.1 policy (the same steps as the gate's
+ * Thin wrapper around twzrd-x402-gate@0.20.2 policy (the same steps as the gate's
  * own wrapFetchWithTwzrdGate): on 402, read the requirements (v2 PAYMENT-REQUIRED
  * header first, then the body) and approve EVERY distinct accepts[] entry via
  * preflight + merchant_card wash refuse. Denied 402s throw before the caller can
  * attach a payment / invoke a signer. Non-402 responses pass through with no intel
  * call.
  *
- * Public 0.16.1 APIs used here: priceUsdcFromAmountMicro, requirementAsset,
+ * Public 0.20.2 APIs used here: priceUsdcFromAmountMicro, requirementAsset,
  * resolveConfig, resolveRequirementFields, twzrdApprovePayment.
  * resolveRequirementFields reports `conflict` (amount_field_conflict,
  * amount_malformed, payto_field_conflict) and leaves the field undefined; that is
@@ -24,7 +24,7 @@ import {
   twzrdApprovePayment,
 } from "twzrd-x402-gate";
 
-/** Same limits and reason code as the gate's own wrappers (twzrd-x402-gate 0.16.1). */
+/** Same limits and reason code as the gate's own wrappers (twzrd-x402-gate 0.20.2). */
 export const MAX_DISTINCT_OFFERS = 8;
 export const TOO_MANY_PAYMENT_OPTIONS = "too_many_payment_options";
 
@@ -82,7 +82,7 @@ function requestUrl(input) {
  * Defaults: refuseWashFlagged on, fail-closed (failOpen false).
  * refuseWashUnknown, refuseUnevaluated and refuseUncappedWarn pass through when they are
  * booleans, so the plugin config that opts the tool-call hook out opts this wrap out too.
- * Unset, the gate decides: its TWZRD_REFUSE_* env var, else on (gate 0.16.1 defaults).
+ * Unset, the gate decides: its TWZRD_REFUSE_* env var, else on (gate 0.20.2 defaults).
  */
 export function gateConfigFromPluginOpts(opts = {}) {
   const fetchImpl = opts.fetch ?? globalThis.fetch.bind(globalThis);

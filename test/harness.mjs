@@ -10,7 +10,8 @@
  * TWZRD_PREFLIGHT_LIVE=1 npm test calls the LIVE free preflight API instead (no auth, no
  * payments), so the recorded answers can be re-checked against intel.
  */
-import { readFile, readdir } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -460,7 +461,7 @@ await t("T12 factory defaults are enforce + fail-closed + wash refuse", async ()
   );
   assert(pkg.version === "0.5.1", `package.json version ${pkg.version}`);
   assert(pluginManifest.version === "0.5.1", `plugin manifest version ${pluginManifest.version}`);
-  assert(pkg.dependencies?.["twzrd-x402-gate"] === "0.16.1", `gate pin ${pkg.dependencies?.["twzrd-x402-gate"]}`);
+  assert(pkg.dependencies?.["twzrd-x402-gate"] === "0.20.2", `gate pin ${pkg.dependencies?.["twzrd-x402-gate"]}`);
   assert(pluginManifest.configSchema.properties.mode.default === "enforce", "manifest mode default");
   assert(
     pluginManifest.configSchema.properties.failMode.default === "closed",
@@ -620,11 +621,11 @@ function makeWashIntelFetch(counter) {
   };
 }
 
-await t("T17 installed twzrd-x402-gate is exact 0.16.1 + 0.16.1 APIs export", async () => {
+await t("T17 installed twzrd-x402-gate is exact 0.20.2 + 0.20.2 APIs export", async () => {
   const dir = path.join(fileURLToPath(new URL("../", import.meta.url)), "node_modules", "twzrd-x402-gate");
   const gatePkg = JSON.parse(await readFile(path.join(dir, "package.json"), "utf8"));
-  assert(gatePkg.version === "0.16.1", `installed gate ${gatePkg.version}`);
-  assert(GATE_CLIENT_VERSION === "0.16.1", `CLIENT_VERSION ${GATE_CLIENT_VERSION}`);
+  assert(gatePkg.version === "0.20.2", `installed gate ${gatePkg.version}`);
+  assert(GATE_CLIENT_VERSION === "0.20.2", `CLIENT_VERSION ${GATE_CLIENT_VERSION}`);
   assert(typeof createTwzrdBeforePaymentHook === "function", "createTwzrdBeforePaymentHook export");
   assert(
     typeof gatePkg.bin?.["twzrd-gate-eval-refuse"] === "string",
@@ -634,7 +635,7 @@ await t("T17 installed twzrd-x402-gate is exact 0.16.1 + 0.16.1 APIs export", as
   const wrapCode = wrapRaw.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
   assert(
     !/\bpaymentRequiredFromResponse\b/.test(wrapCode),
-    "wrap-fetch must not import paymentRequiredFromResponse (not a 0.16.1 package export)",
+    "wrap-fetch must not import paymentRequiredFromResponse (not a 0.20.2 package export)",
   );
 });
 
@@ -785,7 +786,7 @@ const FULL_COVERAGE = { wash_flagged: false, wash_confidence: "full", ring_evalu
 
 /**
  * Intel mock: every seller is an evaluated allow with full, fresh wash coverage; DIRTY_PAYTO
- * is wash-flagged. Gate 0.16.1 refuses less than full coverage by default (refuseWashUnknown).
+ * is wash-flagged. Gate 0.20.2 refuses less than full coverage by default (refuseWashUnknown).
  */
 function makeOfferIntel(counter) {
   return async (input, init) => {
@@ -917,6 +918,61 @@ await t("T27 malformed amount (decimal) → amount_malformed before intel", asyn
   assert(counter.intel === 0, `intel must not be called, got ${counter.intel}`);
 });
 
+// ---- gate 0.20.2 (security): an offer the payer could read differently is refused ----
+for (const [label, extra, reason] of [
+  ["payTo as an array", { payTo: [CLEAN_PAYTO] }, "payto_malformed"],
+  ["payTo as a number", { payTo: 12345 }, "payto_malformed"],
+  ["asset as mint bytes", { asset: Array.from({ length: 32 }, (_, i) => (i * 7 + 3) % 256) }, "asset_malformed"],
+  ["network as an array", { network: ["solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"] }, "network_malformed"],
+  ["amount as an array", { amount: ["10000"] }, "amount_malformed"],
+  ["devnet label on a mainnet USDC mint", { network: "solana-devnet" }, "twzrd_non_usdc_asset"],
+  ["batch-settlement scheme", { scheme: "batch-settlement" }, "batch_settlement_refused"],
+  ["exact with extra.splits", { extra: { splits: [{ recipient: DIRTY_PAYTO, amount: "5000" }] } }, "svm_splits_refused"],
+]) {
+  await t(`T27b ${label} → ${reason} before intel, failMode open included`, async () => {
+    const counter = { intel: 0, preflightSellers: [] };
+    const { err } = await runGated(header402([offer(CLEAN_PAYTO, extra)]), counter, { failMode: "open" });
+    assert(err instanceof TwzrdPaymentBlockedError, `expected block, got ${err}`);
+    assert(err.message.includes(reason), `reason: ${err.message}`);
+    assert(counter.intel === 0, `intel must not be called, got ${counter.intel}`);
+  });
+}
+
+await t("T27c a numeric amount still reads: clean seller passes", async () => {
+  const counter = { intel: 0, preflightSellers: [] };
+  const { resp, err } = await runGated(header402([offer(CLEAN_PAYTO, { amount: 10000 })]), counter);
+  assert(err === null, `numeric amount must pass, got ${err?.message}`);
+  assert(resp?.status === 402, `402 returned to the payer, got ${resp?.status}`);
+});
+
+// ---- gate 0.20.0: the operator halt files stop the 402 wrap too ----
+for (const [label, file, body, reason] of [
+  [".kill present", ".kill", () => "", "twzrd_kill_switch"],
+  [
+    ".pause in force",
+    ".pause",
+    () => JSON.stringify({ schema: "twzrd.pause_sentinel.v1", until_unix_ms: Date.now() + 600_000, reason: "harness" }),
+    "twzrd_payment_paused",
+  ],
+  [".pause unreadable", ".pause", () => "not json", "twzrd_pause_corrupt"],
+]) {
+  await t(`T27d ${label} in TWZRD_STATE_DIR → ${reason} for a clean offer, before intel`, async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "twzrd-preflight-halt-"));
+    try {
+      await writeFile(path.join(dir, file), body());
+      await withEnv("TWZRD_STATE_DIR", dir, async () => {
+        const counter = { intel: 0, preflightSellers: [] };
+        const { err } = await runGated(header402([offer(CLEAN_PAYTO)]), counter, { failMode: "open" });
+        assert(err instanceof TwzrdPaymentBlockedError, `expected block, got ${err}`);
+        assert(err.message.includes(reason), `reason: ${err.message}`);
+        assert(counter.intel === 0, `intel must not be called, got ${counter.intel}`);
+      });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+}
+
 await t("T28 bare \"USDC\" symbol is not a mint → twzrd_non_usdc_asset before intel", async () => {
   const counter = { intel: 0, preflightSellers: [] };
   const { err } = await runGated(header402([offer(CLEAN_PAYTO, { asset: "USDC" })]), counter, { failMode: "open" });
@@ -934,7 +990,7 @@ await t("T29 clean offer + sibling with no recipient → refused whole", async (
   assert(err.message.includes("twzrd_unidentifiable_payment_recipient"), `reason: ${err.message}`);
 });
 
-// ---- gate 0.16.1: the 402 wrap's refuseWashUnknown, refuseUncappedWarn, refuseUnevaluated (on by default) ----
+// ---- gate 0.20.2: the 402 wrap's refuseWashUnknown, refuseUncappedWarn, refuseUnevaluated (on by default) ----
 /** makeOfferIntel, but every merchant_card answers with `card` (wash coverage fields included). */
 function makeCardIntel(counter, card) {
   const base = makeOfferIntel(counter);
@@ -1166,7 +1222,7 @@ await t("T36 shadow logs an unparsed payment as a would-block; refuseUnparsedPay
   assert(off.stats.unparsed === 0 && off.stats.blocked === 0, `off ${JSON.stringify(off.stats)}`);
 });
 
-// ---- the gate 0.16.1 rules: caps, unevaluated sellers, missing cards, wash coverage ----
+// ---- the gate 0.20.2 rules: caps, unevaluated sellers, missing cards, wash coverage ----
 const RULE_PAYTO = "RuLeRuLeRuLeRuLeRuLeRuLeRuLeRuLeRuLe11111";
 const WARN_CAPPED = { decision: "warn", trust_score: 50, score: 0.5, can_spend: true, recommended_cap_usdc: 0.05 };
 const UNEVALUATED = { decision: "warn", trust_score: 45, score: null, null_reason: "unknown_subject", can_spend: false, recommended_cap_usdc: 0.1 };
