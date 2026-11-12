@@ -461,7 +461,7 @@ await t("T12 factory defaults are enforce + fail-closed + wash refuse", async ()
   );
   assert(pkg.version === "0.5.1", `package.json version ${pkg.version}`);
   assert(pluginManifest.version === "0.5.1", `plugin manifest version ${pluginManifest.version}`);
-  assert(pkg.dependencies?.["twzrd-x402-gate"] === "0.20.2", `gate pin ${pkg.dependencies?.["twzrd-x402-gate"]}`);
+  assert(pkg.dependencies?.["twzrd-x402-gate"] === "^0.20.2", `gate dependency ${pkg.dependencies?.["twzrd-x402-gate"]}`);
   assert(pluginManifest.configSchema.properties.mode.default === "enforce", "manifest mode default");
   assert(
     pluginManifest.configSchema.properties.failMode.default === "closed",
@@ -621,11 +621,16 @@ function makeWashIntelFetch(counter) {
   };
 }
 
-await t("T17 installed twzrd-x402-gate is exact 0.20.2 + 0.20.2 APIs export", async () => {
+await t("T17 gate dependency is ^0.20.2, the installed gate satisfies it + 0.20.2 APIs export", async () => {
   const dir = path.join(fileURLToPath(new URL("../", import.meta.url)), "node_modules", "twzrd-x402-gate");
   const gatePkg = JSON.parse(await readFile(path.join(dir, "package.json"), "utf8"));
-  assert(gatePkg.version === "0.20.2", `installed gate ${gatePkg.version}`);
-  assert(GATE_CLIENT_VERSION === "0.20.2", `CLIENT_VERSION ${GATE_CLIENT_VERSION}`);
+  const selfPkg = JSON.parse(await readFile(new URL("../package.json", import.meta.url), "utf8"));
+  const range = selfPkg.dependencies?.["twzrd-x402-gate"];
+  assert(range === "^0.20.2", `gate dependency range ${range}`);
+  // ^0.20.2 on a 0.x version is >=0.20.2 <0.21.0. A gate below 0.20.2 lacks the security refusals.
+  const patch = /^0\.20\.(\d+)$/.exec(gatePkg.version);
+  assert(patch !== null && Number(patch[1]) >= 2, `installed gate ${gatePkg.version} is outside ^0.20.2`);
+  assert(GATE_CLIENT_VERSION === gatePkg.version, `CLIENT_VERSION ${GATE_CLIENT_VERSION} vs installed ${gatePkg.version}`);
   assert(typeof createTwzrdBeforePaymentHook === "function", "createTwzrdBeforePaymentHook export");
   assert(
     typeof gatePkg.bin?.["twzrd-gate-eval-refuse"] === "string",

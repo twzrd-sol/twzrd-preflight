@@ -6,25 +6,32 @@
 > surface is the gate itself (`twzrd-x402-gate` in `twzrd-sol/twzrd-trust`). The plugin was
 > frozen on 2026-10-23 after a 90-day usage review: every call it made to intel fell on its own
 > release and test days, with no external host running it. 0.5.1 is a security release that
-> moves the pin onto gate 0.20.2 (see [0.5.1](#051-security-release)). The 402 wrap is the gate's
+> moves the gate dependency to `^0.20.2` (see [0.5.1](#051-security-release)). The 402 wrap is the gate's
 > own wrapper with its defaults. The hook copies the gate's readiness and wash rules, with the
 > differences listed under [Gate rules](#gate-rules), and agrees with the gate on all 17 shared
 > guard vectors.
 
-OpenClaw plugin **0.5.1**: install = intercept. Pin **`twzrd-x402-gate@0.20.2`**
-(exact; same line as other TWZRD seats).
+OpenClaw plugin **0.5.1**: install = intercept. Depends on **`twzrd-x402-gate@^0.20.2`**
+(0.20.2 or a later 0.20.x patch).
 
 ## 0.5.1 (security release)
 
-0.5.1 moves the gate pin from 0.13.0 to 0.20.2.
+0.5.1 moves the gate dependency from an exact 0.13.0 to `^0.20.2`.
 
 `twzrd-preflight` 0.5.0 and earlier read a 402 through `twzrd-x402-gate` 0.13.0 or older.
 That gate read a `payTo`, `asset` or `network` of the wrong type as absent, or coerced it,
 while a payment client used the raw value, and it took a devnet label at its word for a
 mainnet mint. So the 402 wrap could pass on an offer whose recipient, mint or cluster it had
-not checked. The pin is exact, so this plugin installs its own copy of the gate: upgrading
-`twzrd-x402-gate` in the host does not change the copy the plugin calls. Upgrade the plugin
-(`npm install twzrd-preflight@0.5.1`).
+not checked. Those releases pinned the gate at an exact version, so the plugin installed its
+own copy of the gate: upgrading `twzrd-x402-gate` in the host did not change the copy the
+plugin called. Upgrade the plugin (`npm install twzrd-preflight@0.5.1`).
+
+0.5.1 depends on `twzrd-x402-gate@^0.20.2` instead of an exact version. A later 0.20.x gate
+patch reaches the plugin on a reinstall without a plugin release, and npm can share the
+host's copy of the gate when the host is on 0.20.2 or a later 0.20.x. Run
+`npm ls twzrd-x402-gate` to see which copy is installed. The tool-call hook's copied rules
+are those of gate 0.20.2: a refusal a later gate patch adds applies to the 402 wrap at once,
+and to the hook when this plugin is updated.
 
 What the 402 wrap (`wrapFetchWithTwzrdPreflight`, `installTwzrdFetchWrap`) newly refuses,
 each before intel is asked and with `failMode: "open"` as well:
@@ -202,7 +209,7 @@ Each piece below works alone. Plugged into the hosted checks, they form one pre-
 
 ```bash
 npm install twzrd-preflight
-# depends on twzrd-x402-gate@0.20.2 (exact)
+# depends on twzrd-x402-gate@^0.20.2
 ```
 
 Register in your OpenClaw config:
@@ -399,7 +406,7 @@ T10e) run on 24 only, because openclaw needs Node >=24.16.
 `onDecision`, which must fire exactly once and match what the hook did.
 
 Verified against OpenClaw **2026.7.1-2** (`openclaw.build.openclawVersion` + T10c).
-Gate pin: `twzrd-x402-gate@0.20.2`. Refuse-bin spawn without `@x402/*` peers is a
+Gate dependency: `twzrd-x402-gate@^0.20.2`; the tests run on 0.20.2, the locked version. Refuse-bin spawn without `@x402/*` peers is a
 missing-peer fail (exit 2), not a live dogfood EXTERNAL_RUN.
 
 ## CLI

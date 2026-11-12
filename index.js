@@ -9,7 +9,7 @@
  * Factory defaults: enforce, fail-closed, refuseWashFlagged, refuseWashUnknown,
  * refuseUncappedWarn and refuseUnevaluated on. Shadow / fail-open / each opt-out is opt-in.
  *
- * Gate rules for tool calls, copied from twzrd-x402-gate 0.20.2, which this plugin pins:
+ * Gate rules for tool calls, copied from twzrd-x402-gate 0.20.2 (this plugin depends on ^0.20.2):
  * a card that is missing or says block refuses; a warn is paid only under its own
  * recommended_cap_usdc at a known price; a seller intel never evaluated refuses; a
  * wash_flagged payTo refuses; a merchant card without full, fresh wash coverage refuses.
