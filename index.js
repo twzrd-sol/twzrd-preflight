@@ -9,7 +9,7 @@
  * Factory defaults: enforce, fail-closed, refuseWashFlagged, refuseWashUnknown,
  * refuseUncappedWarn and refuseUnevaluated on. Shadow / fail-open / each opt-out is opt-in.
  *
- * Gate rules for tool calls, copied from twzrd-x402-gate 0.16.1, which this plugin pins:
+ * Gate rules for tool calls, copied from twzrd-x402-gate 0.20.2 (this plugin depends on ^0.20.2):
  * a card that is missing or says block refuses; a warn is paid only under its own
  * recommended_cap_usdc at a known price; a seller intel never evaluated refuses; a
  * wash_flagged payTo refuses; a merchant card without full, fresh wash coverage refuses.
@@ -105,7 +105,7 @@ function finiteNumber(v) {
 
 /**
  * True when intel says it did not evaluate this seller: a null_reason, or score present and
- * null. Copy of twzrd-x402-gate 0.16.1 isUnevaluatedCard (src/policy.ts).
+ * null. Copy of twzrd-x402-gate 0.20.2 isUnevaluatedCard (src/policy.ts).
  */
 function isUnevaluatedCard(card) {
   if (typeof card.null_reason === "string" && card.null_reason.trim() !== "") return true;
@@ -113,7 +113,7 @@ function isUnevaluatedCard(card) {
 }
 
 /**
- * The readiness card rules of twzrd-x402-gate 0.16.1 evaluateReadinessCard (src/policy.ts),
+ * The readiness card rules of twzrd-x402-gate 0.20.2 evaluateReadinessCard (src/policy.ts),
  * copied (with the differences below) and with the gate's reason strings. Pure: no network.
  *
  * Differences from the gate. This plugin has no preflightMinScore or gateOnCanSpend, so a low
@@ -174,7 +174,7 @@ export function overRecommendedCap(evaluation, priceUsdc) {
 /**
  * True only for full, fresh wash coverage: wash_flagged is a boolean, wash_stale is not true,
  * ring_evaluated is not false, and the confidence (wash_confidence, else confidence) is "full".
- * A missing card is not coverage. Copy of twzrd-x402-gate 0.16.1 washEvidenceFromCard plus
+ * A missing card is not coverage. Copy of twzrd-x402-gate 0.20.2 washEvidenceFromCard plus
  * isWashCoverageAdequate (src/wash-default.ts), which also refuses every confidence but full.
  */
 export function isWashCoverageAdequate(mcard) {
@@ -195,7 +195,7 @@ export function isWashCoverageAdequate(mcard) {
 
 /**
  * The twzrd.payment_decision.v1 decision and reason_code for one outcome, in the order
- * twzrd-x402-gate 0.16.1 decisionFromApproval (src/payment-decision.ts) applies them.
+ * twzrd-x402-gate 0.20.2 decisionFromApproval (src/payment-decision.ts) applies them.
  */
 export function paymentDecisionFor({ approved, reason, verdict, outage = false, washFlagged = false, unevaluated = false }) {
   const r = String(reason ?? "");
@@ -459,7 +459,7 @@ export function createGate(rawCfg = {}, logger = console) {
     );
   }
 
-  /** The blockReason for a refusal under one of the 0.16.1 rules: why, and its opt-out. */
+  /** The blockReason for a refusal under one of the 0.20.2 rules: why, and its opt-out. */
   function renderRuleReason(intent, reason) {
     const { why, optOut } = refusalCopy(reason, intent);
     return (
@@ -584,7 +584,7 @@ export function createGate(rawCfg = {}, logger = console) {
       return settle({ approved: true, reason: "twzrd_fail_open", outage: true }); // fail-open opt-in
     }
 
-    // The readiness card, then its cap, then the merchant card: twzrd-x402-gate 0.16.1's order.
+    // The readiness card, then its cap, then the merchant card: twzrd-x402-gate 0.20.2's order.
     const evaluation = evaluateReadinessCard(card, {
       priceUsdc: intent.priceUsdc,
       refuseUncappedWarn: cfg.refuseUncappedWarn,
@@ -700,7 +700,7 @@ const plugin = {
   id: "twzrd-preflight",
   name: "TWZRD Preflight",
   description:
-    "Trust gate on twzrd-x402-gate 0.16.1: wrapFetchWithTwzrdPreflight on HTTP 402 plus payment-shaped tool-call hooks. Defaults: enforce, fail-closed; wash flagged or unknown, an uncapped warn and an unevaluated seller refuse.",
+    "Trust gate on twzrd-x402-gate 0.20.2: wrapFetchWithTwzrdPreflight on HTTP 402 plus payment-shaped tool-call hooks. Defaults: enforce, fail-closed; wash flagged or unknown, an uncapped warn and an unevaluated seller refuse.",
   register(api) {
     const gate = createGate(api.pluginConfig ?? {}, api.logger ?? console);
     // OpenClaw's plugin API registers hooks via `registerHook`, NOT `api.on`.

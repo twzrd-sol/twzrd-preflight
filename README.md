@@ -1,21 +1,59 @@
 # twzrd-preflight
 
-> **Status (2026-11-05): reference implementation.** This plugin is maintained as a
+> **Status (2026-11-12): reference implementation.** This plugin is maintained as a
 > worked example of a TWZRD seat (a `before_tool_call` hook plus a 402 fetch wrap over
 > `twzrd-x402-gate`). Its gate pin is not bumped on each gate release; the live, maintained
 > surface is the gate itself (`twzrd-x402-gate` in `twzrd-sol/twzrd-trust`). The plugin was
 > frozen on 2026-10-23 after a 90-day usage review: every call it made to intel fell on its own
-> release and test days, with no external host running it. 0.5.1 is a pin move onto gate 0.16.1
-> (opt-in Demand Desk replay guard; default allow/refuse unchanged). The 402 wrap is the gate's
+> release and test days, with no external host running it. 0.5.1 is a security release that
+> moves the gate dependency to `^0.20.2` (see [0.5.1](#051-security-release)). The 402 wrap is the gate's
 > own wrapper with its defaults. The hook copies the gate's readiness and wash rules, with the
 > differences listed under [Gate rules](#gate-rules), and agrees with the gate on all 17 shared
 > guard vectors.
 
-OpenClaw plugin **0.5.1**: install = intercept. Pin **`twzrd-x402-gate@0.16.1`**
-(exact; same line as other TWZRD seats).
+OpenClaw plugin **0.5.1**: install = intercept. Depends on **`twzrd-x402-gate@^0.20.2`**
+(0.20.2 or a later 0.20.x patch).
 
-0.5.1 moves the gate pin from 0.13.0 to 0.16.1. By default nothing this plugin
-decides changes:
+## 0.5.1 (security release)
+
+0.5.1 moves the gate dependency from an exact 0.13.0 to `^0.20.2`.
+
+`twzrd-preflight` 0.5.0 and earlier read a 402 through `twzrd-x402-gate` 0.13.0 or older.
+That gate read a `payTo`, `asset` or `network` of the wrong type as absent, or coerced it,
+while a payment client used the raw value, and it took a devnet label at its word for a
+mainnet mint. So the 402 wrap could pass on an offer whose recipient, mint or cluster it had
+not checked. Those releases pinned the gate at an exact version, so the plugin installed its
+own copy of the gate: upgrading `twzrd-x402-gate` in the host did not change the copy the
+plugin called. Upgrade the plugin (`npm install twzrd-preflight@0.5.1`).
+
+0.5.1 depends on `twzrd-x402-gate@^0.20.2` instead of an exact version. A later 0.20.x gate
+patch reaches the plugin on a reinstall without a plugin release, and npm can share the
+host's copy of the gate when the host is on 0.20.2 or a later 0.20.x. Run
+`npm ls twzrd-x402-gate` to see which copy is installed. The tool-call hook's copied rules
+are those of gate 0.20.2: a refusal a later gate patch adds applies to the 402 wrap at once,
+and to the hook when this plugin is updated.
+
+What the 402 wrap (`wrapFetchWithTwzrdPreflight`, `installTwzrdFetchWrap`) newly refuses,
+each before intel is asked and with `failMode: "open"` as well:
+
+- `payto_malformed`, `asset_malformed`, `network_malformed`: a `payTo`, `asset` or `network`
+  that is present and is not a string (gate 0.20.2).
+- `amount_malformed` now also covers an amount sent as an array (gate 0.20.2). A numeric
+  amount still reads.
+- `twzrd_non_usdc_asset` now also covers an offer labeled devnet, testnet or localnet that
+  names a mint other than that cluster's own USDC (gate 0.20.2). A devnet offer that names
+  devnet USDC, or no asset, is decided as before.
+- `batch_settlement_refused`: an offer with the `batch-settlement` scheme (gate 0.20.2).
+- `svm_splits_refused`: a Solana `exact` offer that carries `extra.splits` (gate 0.18.0).
+- `twzrd_kill_switch`, `twzrd_payment_paused`, `twzrd_pause_corrupt`: a `.kill` file, a
+  `.pause` file in force, or an unreadable `.pause` file in the gate's state directory
+  (`TWZRD_STATE_DIR`, default `./data`) (gate 0.20.0).
+
+A well-formed offer is decided as before. The tool-call hook's decisions do not change: the
+gate functions it calls (`fetchMerchantCard`, `applyWashFlaggedPolicy`) and the rules it
+copies are the same in 0.20.2, and it does not read `.kill` or `.pause`.
+
+The other gate releases in the range do not change what this plugin decides:
 
 - 0.13.1 is types and docs only (`TwzrdReadinessBasisEntry`). This plugin does not read `basis`.
 - 0.14.0 and 0.15.0 add Demand Desk authorization entry points
@@ -24,6 +62,13 @@ decides changes:
   `MALFORMED_CHALLENGE`. This plugin does not call `mppChallengeToIntent`.
 - 0.16.1 adds opt-in `createDemandDeskWallet({ replayGuard })`. Without that option, nothing
   changes. This plugin does not call `createDemandDeskWallet`.
+- 0.16.2 makes the MPP seat (`installTwzrdAutoGate("mpp")`) score the seller by default. This
+  plugin does not install it.
+- 0.17.0 and 0.17.1 add Tempo `charge` evaluation and the MPP decision and fulfillment ledger.
+  This plugin does not call them.
+- 0.19.0 keeps `extra` in `mapX402SolanaRequirements`. This plugin does not call it.
+- 0.20.1 stops the `twzrd-cold-start` and `twzrd-bounty-preflight` probes following redirects.
+  This plugin does not run them.
 
 0.5.0 moves the gate pin from 0.12.5 to 0.13.0, and it changes what this plugin refuses by
 default:
@@ -81,11 +126,11 @@ and T29).
 
 `wrapFetchWithTwzrdPreflight` runs TWZRD preflight + merchant_card **wash refuse**
 on every HTTP **402** before a signer can attach payment. Defaults: **enforce**,
-**fail-closed**, **refuseWashFlagged on**, and gate 0.16.1's `refuseWashUnknown`,
+**fail-closed**, **refuseWashFlagged on**, and gate 0.20.2's `refuseWashUnknown`,
 `refuseUncappedWarn` and `refuseUnevaluated` on. Shadow / fail-open / each opt-out are opt-in.
 
 Since 0.4.0 it reads a 402 the way the payer does and checks every offer the payer
-could pick, matching the gate's own wrapper (`twzrd-x402-gate@0.16.1`):
+could pick, matching the gate's own wrapper (`twzrd-x402-gate@0.20.2`):
 
 - x402 v2 requirements are read from the `PAYMENT-REQUIRED` header (base64 JSON)
   before the body. An undecodable header is refused. 0.3.0 refused every
@@ -164,7 +209,7 @@ Each piece below works alone. Plugged into the hosted checks, they form one pre-
 
 ```bash
 npm install twzrd-preflight
-# depends on twzrd-x402-gate@0.16.1 (exact)
+# depends on twzrd-x402-gate@^0.20.2
 ```
 
 Register in your OpenClaw config:
@@ -299,7 +344,7 @@ Built-in coverage: AgentCash MCP tools + exec/curl x402 payments. For other paym
 
 ## Gate rules
 
-The tool-call hook's rules copy `twzrd-x402-gate` 0.16.1 (`evaluateReadinessCard` and the
+The tool-call hook's rules copy `twzrd-x402-gate` 0.20.2 (`evaluateReadinessCard` and the
 merchant-card wash check), with the gate's reason strings. They run in the gate's order:
 
 | Refuses | Reason | Opt-out |
@@ -361,7 +406,7 @@ T10e) run on 24 only, because openclaw needs Node >=24.16.
 `onDecision`, which must fire exactly once and match what the hook did.
 
 Verified against OpenClaw **2026.7.1-2** (`openclaw.build.openclawVersion` + T10c).
-Gate pin: `twzrd-x402-gate@0.16.1`. Refuse-bin spawn without `@x402/*` peers is a
+Gate dependency: `twzrd-x402-gate@^0.20.2`; the tests run on 0.20.2, the locked version. Refuse-bin spawn without `@x402/*` peers is a
 missing-peer fail (exit 2), not a live dogfood EXTERNAL_RUN.
 
 ## CLI
